@@ -1,0 +1,18 @@
+# pytest
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# plugin runtime data
+data/
+!data/.gitkeep
+
+# config 备份
+config_back/
+
+# IDE
+.idea/
+.vscode/
+
