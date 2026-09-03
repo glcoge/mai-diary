@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ...utils import get_logger
 from ...utils import peel_envelope
+from .message import msg_group_id, msg_user_id
 
 logger = get_logger(__name__)
 
@@ -182,11 +183,8 @@ class MessageFetcher:
         ex_g = set(ex_group)
         filtered: List[Dict[str, Any]] = []
         for msg in messages:
-            info = msg.get("message_info") or {}
-            user_info = info.get("user_info") or {}
-            group_info = info.get("group_info") or {}
-            user_id = str(user_info.get("user_id", "") or "")
-            group_id = str(group_info.get("group_id", "") or "")
+            user_id = msg_user_id(msg)
+            group_id = msg_group_id(msg)
             if group_id and group_id in ex_g:
                 continue
             if not group_id and user_id and user_id in ex_p:

@@ -91,7 +91,7 @@ class DiaryStorage:
                 f.write(header + content + footer)
             paths["markdown"] = str(md_path)
 
-        await self._update_index()
+        await self._increment_index(str(diary_data.get("status", "")))
         return paths
 
     # ===== 读取 =====
@@ -203,36 +203,35 @@ class DiaryStorage:
 
     # ===== 内部 =====
 
-    async def _update_index(self) -> None:
+    def _read_index(self) -> Dict[str, Any]:
+        """读索引文件；不存在或损坏返回默认值。"""
         try:
-            index_data: Dict[str, Any] = {
-                "last_update": time.time(),
-                "total_diaries": 0,
-                "success_count": 0,
-                "failed_count": 0,
-            }
-            if not self.json_dir.exists():
-                with self.index_file.open("w", encoding="utf-8") as f:
-                    json.dump(index_data, f, ensure_ascii=False, indent=2)
-                return
-            success = failed = 0
-            for filename in os.listdir(self.json_dir):
-                if not filename.endswith(".json"):
-                    continue
-                try:
-                    with (self.json_dir / filename).open("r", encoding="utf-8") as f:
-                        data = json.load(f)
-                    if data.get("status") == "生成成功":
-                        success += 1
-                    else:
-                        failed += 1
-                except Exception:
-                    failed += 1
-            index_data.update({
-                "success_count": success,
-                "failed_count": failed,
-                "total_diaries": success + failed,
-            })
+            if self.index_file.exists():
+                with self.index_file.open("r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+        except Exception:
+            pass
+        return {
+            "last_update": 0.0,
+            "total_diaries": 0,
+            "success_count": 0,
+            "failed_count": 0,
+        }
+
+    async def _increment_index(self, status: str) -> None:
+        """增量更新索引：按本次保存结果 +1，不再全量扫描 json 目录（O(1)）。"""
+        try:
+            index_data = self._read_index()
+            if str(status) == "生成成功":
+                index_data["success_count"] = int(index_data.get("success_count", 0)) + 1
+            else:
+                index_data["failed_count"] = int(index_data.get("failed_count", 0)) + 1
+            index_data["total_diaries"] = (
+                int(index_data.get("success_count", 0)) + int(index_data.get("failed_count", 0))
+            )
+            index_data["last_update"] = time.time()
             with self.index_file.open("w", encoding="utf-8") as f:
                 json.dump(index_data, f, ensure_ascii=False, indent=2)
         except Exception as exc:

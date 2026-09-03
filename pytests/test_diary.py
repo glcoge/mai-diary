@@ -139,6 +139,10 @@ _PIPELINE = _load_submodule(
     "services.diary.pipeline",
     PLUGIN_ROOT / "services" / "diary" / "pipeline.py",
 )
+_PROMPTS = _load_submodule(
+    "services.diary.prompts",
+    PLUGIN_ROOT / "services" / "diary" / "prompts.py",
+)
 _NTFY = _load_submodule(
     "services.diary.ntfy_notifier",
     PLUGIN_ROOT / "services" / "diary" / "ntfy_notifier.py",
@@ -171,6 +175,7 @@ weather_by_emotion = _TIMELINE.weather_by_emotion
 DiaryStorage = _STORAGE.DiaryStorage
 NarrativeBridge = _BRIDGE.NarrativeBridge
 DiaryPipeline = _PIPELINE.DiaryPipeline
+build_narrative_status = _PROMPTS.build_narrative_status
 NarrativeStore = _NARR_STORE.NarrativeStore
 
 
@@ -1011,11 +1016,7 @@ def test_narrative_status_builds_from_self_state():
     payload = _make_narrative_ctx_payload()
     payload["today_mood_track"] = ["上午：平静 0.55", "午后：轻快 0.72"]
     ctx = {"data": payload}
-    # 构造 pipeline 以调用 _build_narrative_status（仅需实例，无 IO）
-    api = _FakeApi(context_payload=payload)
-    fctx = _FakeCtx(api=api)
-    plugin = SimpleNamespace(ctx=fctx, config=_make_plugin_config())
-    status = DiaryPipeline(plugin)._build_narrative_status(ctx)
+    status = build_narrative_status(ctx)
     assert "心情：平静" in status
     assert "精力 6/10" in status
     assert "作息：上午" in status

@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional
 import asyncio
 
 from ...utils import get_logger
+from .message import is_private, msg_user_id
 
 logger = get_logger(__name__)
 
@@ -122,14 +123,11 @@ class NarrativeBridge:
             session_id = str(msg.get("session_id") or "")
             if session_id and session_id in mode_stream_ids:
                 return True
-            info = msg.get("message_info") or {}
-            user_info = info.get("user_info") or {}
-            user_id = str(user_info.get("user_id") or "")
+            user_id = msg_user_id(msg)
             if not user_id or user_id not in mode_user_ids:
                 continue
-            # 私聊判定：无群信息即私聊（避免群聊里同号误判）
-            group_info = info.get("group_info") or {}
-            if not group_info:
+            # 私聊判定：统一走 message.is_private（规则对齐主程序 message.py:61，避免群聊里同号误判）
+            if is_private(msg):
                 return True
         return False
 

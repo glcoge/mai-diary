@@ -19,7 +19,7 @@ from ...utils import get_logger
 from .fetcher import MessageFetcher
 from .llm_runner import LLMRunner
 from .narrative_bridge import NarrativeBridge
-from .prompts import build_brief_prompt, build_diary_prompt
+from .prompts import build_brief_prompt, build_diary_prompt, build_narrative_status
 from .storage import DiaryStorage
 from .timeline import TimelineBuilder, weather_by_emotion
 
@@ -192,7 +192,7 @@ class DiaryPipeline:
             # 剧本人设当日状态（自我层 mood → prompt，供日记口吻对齐；无则空）
             narrative_status = ""
             if narrative_ctx is not None:
-                narrative_status = self._build_narrative_status(narrative_ctx)
+                narrative_status = build_narrative_status(narrative_ctx)
 
             style = self._cfg.summary.style
             if style == "brief":
@@ -282,40 +282,6 @@ class DiaryPipeline:
             prompt, temperature=self._cfg.llm.temperature, max_tokens=4096
         )
         return text if success else ""
-
-    def _build_narrative_status(self, narrative_ctx: Dict[str, Any]) -> str:
-        """把剧本自我层的当日状态渲染成 prompt 附加上下文（供日记口吻对齐）。
-
-        TODO(Round 3)：``today_mood_track``（每日情绪轨迹）表未建，v0.1 只注入
-        当前心情快照；轨迹字段已在 API 预留，此处直接透传最近条目。
-        """
-        data = narrative_ctx.get("data") or {}
-        self_state = data.get("self_state") or {}
-        parts: List[str] = []
-
-        mood_label = str(self_state.get("mood_label") or "")
-        try:
-            energy = float(self_state.get("mood_energy") or 0.0)
-        except (TypeError, ValueError):
-            energy = 0.0
-        if mood_label:
-            parts.append(f"心情：{mood_label}（精力 {energy * 10:.0f}/10）")
-        phase = str(self_state.get("routine_phase") or "")
-        if phase:
-            parts.append(f"作息：{phase}")
-        hot_thread = str(self_state.get("hot_thread") or "").strip()
-        if hot_thread:
-            parts.append(f"心里挂着：{hot_thread[:40]}")
-
-        track = data.get("today_mood_track") or []
-        if isinstance(track, list):
-            track_text = "；".join(str(item) for item in track[-6:] if str(item).strip())
-            if track_text:
-                parts.append(f"今日情绪轨迹：{track_text}")
-
-        if not parts:
-            return ""
-        return "〔作者当日状态（来自剧本人设自我层）：" + "，".join(parts) + "〕"
 
     async def _save_failed(
         self,

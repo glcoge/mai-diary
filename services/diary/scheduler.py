@@ -16,7 +16,7 @@ import time
 from typing import Optional, Tuple
 
 from ...utils import get_logger
-from ...utils.date import format_date_str, parse_clock
+from ...utils.date import format_date_str, local_now, parse_clock
 from .ntfy_notifier import NtfyNotifier
 from .pipeline import DiaryPipeline
 from .storage import DiaryStorage
@@ -270,9 +270,8 @@ class DiaryScheduler:
         return (self._local_now() - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
 
     def _local_now(self) -> datetime.datetime:
-        """根据 ``timezone_offset_hours`` 偏移当前 UTC 时间。"""
-        offset = int(self._cfg.schedule.timezone_offset_hours or 0)
-        return datetime.datetime.utcnow() + datetime.timedelta(hours=offset)
+        """按配置时区取本地时间（系统时区感知，规避 UTC mislabel 错位）。"""
+        return local_now(int(self._cfg.schedule.timezone_offset_hours or 0))
 
     @staticmethod
     def _next_at(

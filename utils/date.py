@@ -107,6 +107,33 @@ def diary_window_for_date(
     return start_dt.timestamp(), end_dt.timestamp(), diary_date
 
 
+def local_now(offset_hours: int = 8) -> datetime.datetime:
+    """按配置时区返回本地时间（naive、规整到秒）。
+
+    真机踩坑（2026-08-30，源自 narrative 插件）：部分环境（Docker 容器/沙箱）
+    墙钟是 +8 时间，但系统时区被注册为 UTC——``datetime.datetime.now(datetime.timezone.utc)``
+    返回的竟是墙钟而非真 UTC，再叠加偏移会错 8 小时（作息/日期错位）。
+
+    策略（系统感知）：
+    - 系统注册时区 == 目标时区 → 直接信墙钟；
+    - 系统注册为 UTC（常见 mislabel）→ 视为"墙钟即本地"，也信墙钟；
+    - 其余（注册了其他时区且与目标不同）→ 才用 UTC + 偏移。
+    """
+    try:
+        offset = datetime.datetime.now().astimezone()
+        system_hours = (
+            float(offset.utcoffset().total_seconds() / 3600) if offset.utcoffset() else 0.0
+        )
+    except (AttributeError, ValueError, TypeError):
+        system_hours = 0.0
+
+    wall = datetime.datetime.now().replace(microsecond=0)
+    if abs(system_hours - float(offset_hours)) < 0.01 or abs(system_hours) < 0.01:
+        return wall
+    utc_naive = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+    return (utc_naive + datetime.timedelta(hours=int(offset_hours))).replace(microsecond=0)
+
+
 __all__ = [
     "parse_date",
     "format_date_str",
@@ -115,4 +142,5 @@ __all__ = [
     "date_with_weather",
     "parse_clock",
     "diary_window_for_date",
+    "local_now",
 ]
