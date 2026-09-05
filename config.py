@@ -120,8 +120,8 @@ class ScheduleSection(PluginConfigBase):
     )
     persist_state: bool = Field(
         default=True,
-        description="是否在 data/ 持久化最近一次生成/推送日期，避免重启后重复。",
-        json_schema_extra={"label": "持久化状态", "order": 5},
+        description="已废弃（保留兼容）：防重复幂等判定始终生效，不再受此开关控制。",
+        json_schema_extra={"label": "持久化状态（已废弃）", "order": 5},
     )
 
 

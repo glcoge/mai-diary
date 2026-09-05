@@ -6,6 +6,8 @@
 - 生成：从消息上下文拉数据 → LLM → 落盘 JSON / Markdown
 - 推送：从 storage 读"昨天"的日记 → 调 NtfyNotifier 推送
 - 两个时间点共用一个 asyncio 任务，循环里取较早的下一次触发。
+- 防重复（幂等）不依赖 persist_state 开关：补生成按"昨日日记数据是否存在"
+  判定，推送按 last_pushed_date 读写判定（修复重启后重复生成/重复推送）。
 """
 
 from __future__ import annotations
@@ -46,14 +48,8 @@ class DiaryScheduler:
         now = self._local_now()
         next_gen = self._next_at(now, parse_clock(self._cfg.schedule.generate_time))
         next_push = self._next_at(now, parse_clock(self._cfg.schedule.push_time))
-        last_gen = (
-            self._storage.read_last_diary_date()
-            if self._cfg.schedule.persist_state else None
-        )
-        last_push = (
-            self._storage.read_last_pushed_date()
-            if self._cfg.schedule.persist_state else None
-        )
+        last_gen = self._storage.read_last_diary_date()
+        last_push = self._storage.read_last_pushed_date()
         return {
             "running": self._is_running,
             "generate_time": self._cfg.schedule.generate_time,
@@ -164,9 +160,9 @@ class DiaryScheduler:
         if not self._notifier.is_configured():
             return False
         target_date = self._yesterday_str()
-        if self._cfg.schedule.persist_state:
-            if self._storage.read_last_pushed_date() == target_date:
-                return False
+        # 幂等判定不依赖 persist_state：已推送过昨天就直接返回 False
+        if self._storage.read_last_pushed_date() == target_date:
+            return False
         return await self._storage.get_diary(target_date) is not None
 
     async def _maybe_recover(
@@ -183,14 +179,18 @@ class DiaryScheduler:
                 hour=gen_cutoff[0], minute=gen_cutoff[1], second=0, microsecond=0
             )
             if now >= target_dt:
-                last_date = (
-                    self._storage.read_last_diary_date()
-                    if self._cfg.schedule.persist_state else None
-                )
                 target_date = self._yesterday_str()
-                if last_date != target_date:
+                # 按数据存在性判定：昨日已有日记数据（无论成功或报错状态）
+                # 就不重生成，避免重启后重复生成；数据缺失才补跑。
+                existing = await self._storage.get_diary(target_date)
+                if existing is None:
                     logger.info("scheduler: 启动补生成 %s 的日记", target_date)
                     await self._generate_for_date_safe(target_date, source="recover")
+                else:
+                    logger.info(
+                        "scheduler: %s 的日记已存在（status=%s），跳过补生成",
+                        target_date, str(existing.get("status") or ""),
+                    )
 
         # 补推送
         if push_cutoff is not None:
@@ -225,11 +225,11 @@ class DiaryScheduler:
 
         target_date = self._yesterday_str()
 
-        if self._cfg.schedule.persist_state:
-            last_pushed = self._storage.read_last_pushed_date()
-            if last_pushed == target_date:
-                logger.info("[%s] %s 今日已推送，跳过", source, target_date)
-                return
+        # 幂等判定不依赖 persist_state：推送过的日期不再重复推送
+        last_pushed = self._storage.read_last_pushed_date()
+        if last_pushed == target_date:
+            logger.info("[%s] %s 今日已推送，跳过", source, target_date)
+            return
 
         diary = await self._storage.get_diary(target_date)
         if not diary:
@@ -255,7 +255,8 @@ class DiaryScheduler:
                 weather=weather,
             )
 
-        if ok and self._cfg.schedule.persist_state:
+        if ok:
+            # 幂等状态始终落盘（不受 persist_state 门控），否则重启后无法判定"已推送"
             self._storage.write_last_pushed_date(target_date)
         elif not ok:
             logger.warning(

@@ -147,6 +147,10 @@ _NTFY = _load_submodule(
     "services.diary.ntfy_notifier",
     PLUGIN_ROOT / "services" / "diary" / "ntfy_notifier.py",
 )
+_SCHEDULER = _load_submodule(
+    "services.diary.scheduler",
+    PLUGIN_ROOT / "services" / "diary" / "scheduler.py",
+)
 
 # narrative 插件的独立存储实现（幂等测试用；无相对依赖，可独立加载）
 _NARR_STORE = _load_submodule(
@@ -175,6 +179,7 @@ weather_by_emotion = _TIMELINE.weather_by_emotion
 DiaryStorage = _STORAGE.DiaryStorage
 NarrativeBridge = _BRIDGE.NarrativeBridge
 DiaryPipeline = _PIPELINE.DiaryPipeline
+DiaryScheduler = _SCHEDULER.DiaryScheduler
 build_narrative_status = _PROMPTS.build_narrative_status
 NarrativeStore = _NARR_STORE.NarrativeStore
 
@@ -1021,6 +1026,187 @@ def test_narrative_status_builds_from_self_state():
     assert "精力 6/10" in status
     assert "作息：上午" in status
     assert "今日情绪轨迹" in status
+
+
+# ===== 重启防重复回归（Fix B：幂等判定与 persist_state 解耦） =====
+#
+# 背景：persist_state=false 时，启动补跑的全部防重复检查曾被门控失效，
+# 导致每次重启重复生成 + 重复 ntfy 推送（含失败消息）。修复后语义：
+#   - 补生成按数据存在性判定（昨日已有日记数据则不重生成）
+#   - 推送按 last_pushed_date 幂等判定（读写不再受 persist_state 门控）
+
+
+def _yesterday() -> str:
+    """与 scheduler._yesterday_str 同口径的"昨天"（系统本地时区）。"""
+    return (datetime.datetime.now() - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+
+
+def _make_sched_cfg(base_dir: Path, *, persist_state: bool) -> SimpleNamespace:
+    """构造 scheduler 所需的最小 config（SimpleNamespace 替代 Pydantic）。"""
+    return SimpleNamespace(
+        output=SimpleNamespace(base_dir=str(base_dir)),
+        ntfy=_make_ntfy_cfg(),
+        schedule=SimpleNamespace(
+            generate_time="04:00",
+            push_time="08:00",
+            persist_state=persist_state,
+            timezone_offset_hours=8,
+            check_interval_seconds=60,
+        ),
+    )
+
+
+class _RecordingNotifier:
+    """记录推送调用的假 notifier（不发出真实网络请求）。"""
+
+    def __init__(self) -> None:
+        self.sent: list = []
+
+    def is_configured(self) -> bool:
+        return True
+
+    async def send_diary(self, **kw) -> bool:
+        self.sent.append(("diary", str(kw.get("date"))))
+        return True
+
+    async def send_failure(self, **kw) -> bool:
+        self.sent.append(("failure", str(kw.get("date"))))
+        return True
+
+
+class _RecordingPipeline:
+    """记录生成调用的假 pipeline（类级 calls 列表，取回 scheduler 内部构造的实例的记录）。"""
+
+    calls: list = []
+
+    def __init__(self, plugin) -> None:
+        pass
+
+    async def generate_for_date(self, date: str):
+        _RecordingPipeline.calls.append(date)
+        return True, "ok"
+
+
+def _make_scheduler(tmp_path: Path, *, persist_state: bool):
+    """构造 scheduler，并把 notifier 替换为记录型假件。"""
+    plugin = SimpleNamespace(config=_make_sched_cfg(tmp_path, persist_state=persist_state))
+    sched = DiaryScheduler(plugin)
+    sched._notifier = _RecordingNotifier()
+    return sched
+
+
+def _run_recover_with_recording(sched):
+    """用记录型假 pipeline 类替换后跑一次启动补跑（_maybe_recover），返回该假类。"""
+    _RecordingPipeline.calls = []
+    original = _SCHEDULER.DiaryPipeline
+    _SCHEDULER.DiaryPipeline = _RecordingPipeline
+    try:
+        asyncio.run(sched._maybe_recover((4, 0), (8, 0)))
+    finally:
+        _SCHEDULER.DiaryPipeline = original
+    return _RecordingPipeline
+
+
+def _seed_diary(storage: DiaryStorage, date: str, *, status: str) -> None:
+    """向临时 storage 写入指定日期/状态的日记。"""
+    success = status == "生成成功"
+    asyncio.run(storage.save_diary(
+        {
+            "date": date,
+            "status": status,
+            "word_count": 100 if success else 0,
+            "weather": "晴" if success else "阴",
+            "diary_content": "昨天的日记" if success else "",
+            "error_message": "" if success else "原因:消息数不足",
+            "generation_time": 1.0,
+        }
+    ))
+
+
+def test_restart_no_regen_no_repush_persist_off(tmp_path: Path):
+    """回归（用户真机场景）：persist_state=false + 昨天已生成已推送 → 重启零动作。"""
+    yesterday = _yesterday()
+    sched = _make_scheduler(tmp_path, persist_state=False)
+    sched._storage.write_last_diary_date(yesterday)
+    sched._storage.write_last_pushed_date(yesterday)
+    _seed_diary(sched._storage, yesterday, status="生成成功")
+
+    fake = _run_recover_with_recording(sched)
+
+    assert fake.calls == [], "已有日记数据，不应重新生成"
+    assert sched._notifier.sent == [], "已推送的日记不应被重新推送"
+
+
+def test_restart_no_regen_no_repush_persist_on(tmp_path: Path):
+    """persist_state=true 时行为一致：解耦后开关不再影响防重复正确性。"""
+    yesterday = _yesterday()
+    sched = _make_scheduler(tmp_path, persist_state=True)
+    sched._storage.write_last_diary_date(yesterday)
+    sched._storage.write_last_pushed_date(yesterday)
+    _seed_diary(sched._storage, yesterday, status="生成成功")
+
+    fake = _run_recover_with_recording(sched)
+
+    assert fake.calls == [], "已有日记数据，不应重新生成"
+    assert sched._notifier.sent == [], "已推送的日记不应被重新推送"
+
+
+def test_restart_no_repush_for_failed_diary(tmp_path: Path):
+    """报错日记按设计只推一次：重启不重生成、不重复推失败消息。"""
+    yesterday = _yesterday()
+    sched = _make_scheduler(tmp_path, persist_state=False)
+    sched._storage.write_last_pushed_date(yesterday)
+    _seed_diary(sched._storage, yesterday, status="报错:生成失败")
+
+    fake = _run_recover_with_recording(sched)
+
+    assert fake.calls == [], "报错日记也属于已有数据，不应重新生成"
+    assert sched._notifier.sent == [], "失败消息已推送过，不应重复推送"
+
+
+def test_restart_recovers_unpushed_diary_once(tmp_path: Path):
+    """正常补推送不受影响：昨天日记存在但未推送 → 恰好推送一次并落状态。"""
+    yesterday = _yesterday()
+    sched = _make_scheduler(tmp_path, persist_state=False)
+    _seed_diary(sched._storage, yesterday, status="生成成功")
+
+    fake = _run_recover_with_recording(sched)
+
+    assert fake.calls == [], "已有日记数据，不应重新生成"
+    assert sched._notifier.sent == [("diary", yesterday)]
+    # persist_state=false 也必须写入 last_pushed_date（幂等的关键）
+    assert sched._storage.read_last_pushed_date() == yesterday
+
+    # 再次重启（第二次补跑）：不再推送
+    fake2 = _run_recover_with_recording(sched)
+    assert fake2.calls == []
+    assert sched._notifier.sent == [("diary", yesterday)]
+
+
+def test_recover_still_generates_when_diary_missing(tmp_path: Path):
+    """数据存在性判定不误伤补生成：昨天无日记数据 → 补生成照常触发。"""
+    yesterday = _yesterday()
+    sched = _make_scheduler(tmp_path, persist_state=False)
+    # 即便 last_diary_date 标记声称已生成，数据缺失时仍以数据为准
+    sched._storage.write_last_diary_date(yesterday)
+
+    fake = _run_recover_with_recording(sched)
+
+    assert fake.calls == [yesterday]
+
+
+def test_has_unpushed_yesterday_independent_of_persist_state(tmp_path: Path):
+    """推送候选判定：last_pushed_date 去重不依赖 persist_state。"""
+    yesterday = _yesterday()
+    sched = _make_scheduler(tmp_path, persist_state=False)
+    sched._storage.write_last_pushed_date(yesterday)
+    _seed_diary(sched._storage, yesterday, status="生成成功")
+
+    assert asyncio.run(sched._has_unpushed_yesterday()) is False
+
+    # 未推送时判定为 True（正常补推送路径保留）
+    sched._storage.write_last_pushed_date("2000-01-01")
+    assert asyncio.run(sched._has_unpushed_yesterday()) is True
 
 
 # ===== 独立运行入口（不依赖 pytest） =====

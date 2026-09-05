@@ -253,8 +253,9 @@ class DiaryPipeline:
                 markdown_header_template=self._cfg.output.markdown_header_template,
                 markdown_footer_template=self._cfg.output.markdown_footer_template,
             )
-            if self._cfg.schedule.persist_state:
-                self._storage.write_last_diary_date(date)
+            # 防重复状态始终落盘：last_diary_date 仅作状态展示/追溯，
+            # 补生成判定已改为按日记数据存在性（不受 persist_state 门控）
+            self._storage.write_last_diary_date(date)
 
             # 剧本人设握手：把当日日记成品追加到自我层编年史（幂等，失败不阻塞）
             if narrative_ctx is not None:
