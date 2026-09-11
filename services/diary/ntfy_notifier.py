@@ -145,7 +145,11 @@ class NtfyNotifier:
             logger.warning("ntfy 失败标题模板渲染失败: %s", exc)
             title = f"❌ 日记生成失败  {date}"
 
-        body = f"日记生成失败：{error}\n\n—— mai-diary"
+        body = (
+            f"日记生成失败：{error}\n\n"
+            f"可执行 /diary gen {date} 手动重试。\n\n"
+            "—— mai-diary"
+        )
 
         return await self._post(
             title=title,

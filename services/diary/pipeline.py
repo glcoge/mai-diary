@@ -60,11 +60,16 @@ class DiaryPipeline:
 
     # ===== 公开入口 =====
 
-    async def generate_for_date(self, date: str) -> Tuple[bool, str]:
+    async def generate_for_date(self, date: str) -> Tuple[bool, str, bool]:
         """生成指定日期（YYYY-MM-DD）对应的日记。
 
         时间窗：``[date 04:00, date+1 04:00)``，由配置 ``schedule.timezone_offset_hours``
         间接影响（调用方传入的 ``date`` 已按目标时区换算好）。
+
+        Returns:
+            ``(ok, message, retryable)``。``retryable`` 仅当 ``ok=False`` 时有意义：
+            软失败（LLM 空返回 / 异常）为 True，硬失败（消息数不足，窗口已闭合、
+            重试无意义）为 False。成功时统一为 False。
         """
         start_time, end_time, label = diary_window_for_date(
             date, cutoff_hour=self._compute_cutoff_hour()
@@ -90,7 +95,8 @@ class DiaryPipeline:
 
         min_count = self._cfg.message.min_message_count
         if len(messages) < min_count:
-            return False, f"消息数量不足({len(messages)}/{min_count})"
+            # 硬失败：时间窗已闭合，重试不会改变消息数，因此不可重试
+            return False, f"消息数量不足({len(messages)}/{min_count})", False
 
         return await self._generate_from_messages(label, messages, start_time, end_time)
 
@@ -156,7 +162,8 @@ class DiaryPipeline:
         messages: List[Dict[str, Any]],
         start_time: float,
         end_time: float,
-    ) -> Tuple[bool, str]:
+    ) -> Tuple[bool, str, bool]:
+        """从已抓取的消息生成日记。返回 ``(ok, message, retryable)``。"""
         try:
             personality, expression, bot_qq, narrative_ctx = await self._resolve_personality(messages)
 
@@ -228,7 +235,7 @@ class DiaryPipeline:
             content = await self._call_model(prompt)
             if not content:
                 await self._save_failed(date, weather, "模型返回空内容", timeline_builder.stats)
-                return False, "模型生成日记失败（返回空）"
+                return False, "模型生成日记失败（返回空）", True
 
             content = content.strip()
             if len(content) > max_wc:
@@ -269,14 +276,14 @@ class DiaryPipeline:
                         "编年史写入失败（%s，日记本身不受影响）: %s",
                         date, result.get("reason") or "unavailable",
                     )
-            return True, content
+            return True, content, False
         except Exception as exc:
             logger.error("生成日记失败: %s", exc, exc_info=True)
             try:
                 await self._save_failed(date, "阴", str(exc), {"bot_messages": 0, "user_messages": 0})
             except Exception:
                 pass
-            return False, f"生成日记时出错: {exc}"
+            return False, f"生成日记时出错: {exc}", True
 
     async def _call_model(self, prompt: str) -> str:
         success, text = await self._llm.generate(

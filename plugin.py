@@ -99,6 +99,7 @@ class MaiDiaryPlugin(MaiBotPlugin):
         text = (
             "/diary help                  - 查看本帮助\n"
             "/diary gen [日期]            - 手动触发生成（默认昨天）\n"
+            "/diary push [日期]           - 手动推送该日日记到 ntfy（默认昨天）\n"
             "/diary ls                    - 列出最近 10 篇日记\n"
             "/diary v [日期] [编号]       - 查看某天日记的元信息 + 文件路径\n"
             "/diary status                - 调度器与最近一次生成状态\n"
@@ -138,6 +139,24 @@ class MaiDiaryPlugin(MaiBotPlugin):
             f"（正文请直接打开上述文件查看，本插件不会回传内容）"
         )
         await self.ctx.send.text(text, stream_id)
+
+    async def _cmd_push(self, param: str, stream_id: str) -> None:
+        """手动推送指定日期（默认昨天）的最新日记 / 失败消息到 ntfy。
+
+        与自动推送的区别：不受"每日每通道 ≤1 条"限额拦截（用户显式意图），
+        推送成功后仍会写通道状态，避免随后的自动推送重复发送。
+        """
+        from .utils.date import format_date_str, parse_date, yesterday_str
+        date = format_date_str(parse_date(param)) if param else yesterday_str()
+        if not date:
+            await self.ctx.send.text(f"日期格式错误: {param}", stream_id)
+            return
+        if self._scheduler is None:
+            await self.ctx.send.text("调度器未启动（plugin.enabled=false？）", stream_id)
+            return
+        await self.ctx.send.text(f"正在推送 {date} 的日记...", stream_id)
+        ok, msg = await self._scheduler.push_now(date)
+        await self.ctx.send.text(("✅ " if ok else "⚠️ ") + msg, stream_id)
 
     async def _cmd_ls(self, stream_id: str) -> None:
         from .services.diary.storage import DiaryStorage
@@ -219,7 +238,9 @@ class MaiDiaryPlugin(MaiBotPlugin):
             f"推送时间: {s['push_time']}\n"
             f"当前时间: {s['now']}\n"
             f"上次生成: {s['last_diary_date']}\n"
-            f"上次推送: {s['last_pushed_date']}\n"
+            f"上次推送日记: {s['last_pushed_diary_date']}\n"
+            f"上次推送失败: {s['last_pushed_error_date']}\n"
+            f"重试状态: {s['retry_state']}\n"
             f"下次生成: {s['next_generate_at']}\n"
             f"下次推送: {s['next_push_at']}\n"
             f"ntfy: {ntfy_state}"
@@ -255,6 +276,9 @@ class MaiDiaryPlugin(MaiBotPlugin):
 
         if cmd == "gen":
             await self._cmd_gen(param, stream_id)
+            return True, "ok", True
+        if cmd == "push":
+            await self._cmd_push(param, stream_id)
             return True, "ok", True
         if cmd == "ls":
             await self._cmd_ls(stream_id)

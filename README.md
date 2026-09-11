@@ -28,7 +28,7 @@ plugins/glcoge-mai-diary/data/diary/markdown/YYYY-MM-DD.md
   - `data/diary/markdown/YYYY-MM-DD.md`（**仅本地留存**，不通过任何接口输出）
   - `data/diary/json/YYYY-MM-DD_HHMMSS.json`（结构化记录）
 - 每天 **08:00** 通过 ntfy 推送至手机（可配 `schedule.push_time`，可关闭）
-- 提供命令：`/diary help|gen|ls|v|status`（仅返回元信息；需在 `admin_qq` 白名单中）
+- 提供命令：`/diary help|gen|push|ls|v|status`（仅返回元信息；需在 `admin_qq` 白名单中）
 - 提供 API：`generate_diary_api`（仅返回元信息；不含 content）
 
 ## 安装
@@ -89,6 +89,12 @@ truncate_suffix = "\n\n…（已截断，全文见本地文件）"
 click_action = ""
 send_on_failure = true
 timeout_seconds = 10
+
+[retry]
+enabled = true                # 失败延迟重试总开关
+max_attempts = 3              # 重试次数上限（不含首次尝试）
+base_delay_minutes = 10       # 首次重试延迟，指数退避：10 / 20 / 40 …
+max_delay_minutes = 120       # 单次重试延迟上限
 ```
 
 ## 时间窗说明
@@ -106,9 +112,10 @@ timeout_seconds = 10
 |------|------|
 | `/diary help` | 查看帮助 |
 | `/diary gen [日期]` | 手动触发生成（默认昨天），返回字数 + 文件路径。**不**触发立即推送；将在下一次 `push_time` 统一推送 |
+| `/diary push [日期]` | 手动把指定日期（默认昨天）的日记推送到 ntfy，绕过每日限流（仍写推送状态） |
 | `/diary ls` | 列出最近 10 篇（日期 / 字数 / 状态 / 文件路径） |
 | `/diary v [日期] [编号]` | 返回该日日记的元信息 + 文件路径（**不**回显正文） |
-| `/diary status` | 调度器状态、生成/推送时间、上次生成/推送、下次触发时间、ntfy 状态 |
+| `/diary status` | 调度器状态、生成/推送时间、上次生成、双频道上次推送、重试状态、下次触发时间、ntfy 状态 |
 
 `/diary` 系列命令要求发送者在 `[plugin].admin_qq` 白名单内。
 
@@ -158,7 +165,7 @@ result = await ctx.api.call(
 
 **失败**（默认模板）：
 - 标题：`❌ 日记生成失败  2026-07-27`
-- 正文：`日记生成失败：<错误信息>\n\n—— mai-diary`
+- 正文：`日记生成失败：<错误信息>\n\n可执行 /diary gen 2026-07-27 手动重试。\n\n—— mai-diary`
 
 ### ⚠️ 隐私警告
 

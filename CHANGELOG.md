@@ -1,5 +1,34 @@
 # Changelog
 
+## 1.4.0 - 2026-09-11
+
+### 用户感知功能
+
+- **失败延迟重试**：日记生成遇到可恢复错误（LLM 超时、模型返回空、调用异常）时，按指数退避自动重试，
+  最多 3 次（共 4 次尝试，延迟 10 / 20 / 40 分钟，单次上限 120 分钟），成功即停止并自动补推日记。
+  「消息数量不足」属硬失败，**不进入**重试队列（避免空跑消耗模型额度）。
+- **重试预算持久化**：未用完的重试预算在进程重启后**续跑**，不再因重启丢失（部分放宽 1.3.0 的"报错记录
+  阻断重启补生成"语义：仅当重试预算耗尽才阻断）。
+- **推送按频道每日限流**：正常日记与失败通知**各自**每天最多推送一次，消除"重复生成 → ntfy 刷屏"。
+  升级日兼容：旧的 `last_pushed_date.txt` 作为只读回退读取，不会因此重复推送。
+- **新增手动推送命令** `/diary push [日期]`：手动把指定日期（默认昨天）的日记推到 ntfy，绕过每日限流但仍写推送状态。
+- **失败通知附手动重试提示**：失败推送正文追加「可执行 /diary gen <日期> 手动重试」。
+- **重试在 push_time 之后成功**（或手动重生成成功）：立即自动补推该日日记。
+
+### 开发
+
+- `services/diary/storage.py`：推送状态拆分为双频道（`last_pushed_diary_date.txt` / `last_pushed_error_date.txt`），
+  旧文件作只读回退；新增 `retry_state.json` 读写（存绝对 unix 时间戳，规避时区墙钟偏移坑）。
+- `services/diary/pipeline.py`：`generate_for_date` / `_generate_from_messages` 返回三元组 `(ok, message, retryable)`，
+  显式区分硬失败与可恢复失败。
+- `services/diary/scheduler.py`：新增重试状态机（预算/退避/续跑/终止补推）、双频道推送、
+  `push_now()` 手动推送入口；`get_status()` 暴露 `last_pushed_diary_date` / `last_pushed_error_date` / `retry_state`。
+- `config.py`：新增 `[retry]` 配置段（`enabled` / `max_attempts` / `base_delay_minutes` / `max_delay_minutes`）。
+  既有部署无需手改 `config.toml`，SDK 载入时自动合并默认值。
+- `plugin.py`：新增 `/diary push` 命令与帮助文案，`/diary status` 展示双频道推送状态与重试状态。
+- `pytests/test_diary.py`：新增 ~22 个用例（软/硬/手动/关闭重试、退避序列与封顶、终止补推、
+  状态跨重启续跑、双频道推送、`push_now` 各分支、推送状态字段），引入冻结时钟测试夹具；共 **77 个测试全通过**。
+
 ## 1.3.0 - 2026-08-30
 
 ### 剧本人设系统适配（mai-diary ↔ glcoge.mai-narrative 握手）

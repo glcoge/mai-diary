@@ -185,6 +185,7 @@ async def main():
     print()
 
     if "报错" in status:
+        channel = "error"
         print(f"[推送] 走 send_failure 分支（send_on_failure={cfg.send_on_failure}）")
         if not cfg.send_on_failure:
             print("❌  send_on_failure=false，已跳过")
@@ -194,6 +195,7 @@ async def main():
             return 0
         ok = await notifier.send_failure(date=date, error=error_msg or status)
     else:
+        channel = "diary"
         if not content:
             print("❌  日记内容为空，跳过")
             return 1
@@ -207,12 +209,12 @@ async def main():
 
     print(f"[结果] send_*: {ok}")
     if ok:
-        # 写 last_pushed_date.txt 模拟 scheduler 行为
-        state_file = base_dir / "last_pushed_date.txt"
+        # 按频道写推送标记，模拟 scheduler 双通道行为（v1.4.0）
+        state_file = base_dir / ("last_pushed_error_date.txt" if channel == "error" else "last_pushed_diary_date.txt")
         state_file.write_text(date + "\n", encoding="utf-8")
         print(f"[状态] 已更新 {state_file.name} = {date}")
     else:
-        print("[状态] 未更新 last_pushed_date，下次可重试")
+        print(f"[状态] 未更新 last_pushed_{channel}_date，下次可重试")
     return 0 if ok else 1
 
 

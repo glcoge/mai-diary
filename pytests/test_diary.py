@@ -21,6 +21,7 @@ import datetime
 import importlib.util
 import os
 import sys
+import time
 import types
 from pathlib import Path
 from typing import Any, Dict
@@ -423,13 +424,50 @@ def test_storage_last_diary_date(tmp_path: Path):
     assert storage.read_last_diary_date() == "2026-07-27"
 
 
-def test_storage_last_pushed_date(tmp_path: Path):
+def test_storage_push_channels_independent(tmp_path: Path):
+    """推送状态双通道：正常日记 / 失败消息各自独立计数。"""
     storage = DiaryStorage(base_dir=str(tmp_path / "diary"))
-    assert storage.read_last_pushed_date() is None
-    storage.write_last_pushed_date("2026-07-27")
-    assert storage.read_last_pushed_date() == "2026-07-27"
-    storage.write_last_pushed_date("2026/07/28")
-    assert storage.read_last_pushed_date() == "2026-07-28"
+    assert storage.read_last_pushed_diary_date() is None
+    assert storage.read_last_pushed_error_date() is None
+
+    storage.write_last_pushed_diary_date("2026-07-27")
+    assert storage.read_last_pushed_diary_date() == "2026-07-27"
+    assert storage.read_last_pushed_error_date() is None
+
+    storage.write_last_pushed_error_date("2026/07/28")
+    assert storage.read_last_pushed_error_date() == "2026-07-28"
+    assert storage.read_last_pushed_diary_date() == "2026-07-27"
+
+
+def test_storage_legacy_push_marker_lazy_fallback(tmp_path: Path):
+    """旧版 last_pushed_date.txt 被两通道回退读取（升级当天不重复推送）。"""
+    base = tmp_path / "diary"
+    storage = DiaryStorage(base_dir=str(base))
+    (base / "last_pushed_date.txt").write_text("2026-07-27\n", encoding="utf-8")
+
+    assert storage.read_last_pushed_diary_date() == "2026-07-27"
+    assert storage.read_last_pushed_error_date() == "2026-07-27"
+
+    # 新通道写过之后就只认新文件，不再回退
+    storage.write_last_pushed_diary_date("2026-07-28")
+    assert storage.read_last_pushed_diary_date() == "2026-07-28"
+    assert storage.read_last_pushed_error_date() == "2026-07-27"
+
+
+def test_storage_retry_state_roundtrip(tmp_path: Path):
+    """重试状态落盘 / 读取 / 清除。"""
+    storage = DiaryStorage(base_dir=str(tmp_path / "diary"))
+    assert storage.read_retry_state() is None
+
+    storage.write_retry_state(date="2026-07-27", attempts_done=1, next_retry_ts=123.5)
+    state = storage.read_retry_state()
+    assert state is not None
+    assert state["date"] == "2026-07-27"
+    assert state["attempts_done"] == 1
+    assert state["next_retry_ts"] == 123.5
+
+    storage.clear_retry_state()
+    assert storage.read_retry_state() is None
 
 
 def test_storage_list_diaries(tmp_path: Path):
@@ -665,6 +703,21 @@ def test_ntfy_send_failure_uses_failure_template():
     assert ok is True
     headers = _FakeConnection.instances[0].captured["headers"]
     assert headers["Title"] == "❌ 日记生成失败  2026-07-27"
+
+
+def test_ntfy_send_failure_includes_manual_retry_hint():
+    """失败通知正文带手动重试提示（每日最多一条错误消息的兜底入口）。"""
+    _FakeConnection.configure(status=200)
+    restore = _patch_connections()
+    try:
+        n = NtfyNotifier(_make_ntfy_cfg())
+        ok = asyncio.run(n.send_failure(date="2026-07-27", error="模型返回空"))
+    finally:
+        restore()
+
+    assert ok is True
+    body = _FakeConnection.instances[0].captured["body"]
+    assert b"/diary gen 2026-07-27" in body
 
 
 def test_ntfy_send_failure_kill_switch():
@@ -1028,20 +1081,48 @@ def test_narrative_status_builds_from_self_state():
     assert "今日情绪轨迹" in status
 
 
-# ===== 重启防重复回归（Fix B：幂等判定与 persist_state 解耦） =====
+# ===== 调度器：推送双通道 / 失败退避重试 =====
 #
-# 背景：persist_state=false 时，启动补跑的全部防重复检查曾被门控失效，
-# 导致每次重启重复生成 + 重复 ntfy 推送（含失败消息）。修复后语义：
-#   - 补生成按数据存在性判定（昨日已有日记数据则不重生成）
-#   - 推送按 last_pushed_date 幂等判定（读写不再受 persist_state 门控）
+# 背景（2026-09-11 改造）：
+#   - 推送拆成双通道：同一日记日期最多推 1 条正常日记 + 1 条失败消息；
+#   - 软失败（LLM 空返回/超时/异常）按指数退避重试，最多 3 次，成功即停；
+#     硬失败（消息数量不足）不重试；手动触发失败不重试；
+#   - 重试状态落盘 retry_state.json，重启后预算未尽则续跑；
+#   - 重试挂起时推送顺延，重试/手动生成成功且已过 push_time 则跟进补推一次。
+#
+# 时间相关判定依赖 scheduler._local_now()，测试统一用"冻结时钟"固定在
+# 12:00（晚于 push_time=08:00），避免结果随运行时刻漂移。
+
+_FROZEN_NOW = datetime.datetime(2026, 9, 11, 12, 0, 0)
+_FROZEN_YESTERDAY = "2026-09-10"
 
 
-def _yesterday() -> str:
-    """与 scheduler._yesterday_str 同口径的"昨天"（系统本地时区）。"""
-    return (datetime.datetime.now() - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+class _FrozenClock:
+    """把 scheduler 模块内的 ``local_now`` 冻结到指定时刻。"""
+
+    def __init__(self, moment: datetime.datetime) -> None:
+        self._moment = moment
+        self._original = None
+
+    def __enter__(self) -> "_FrozenClock":
+        self._original = _SCHEDULER.local_now
+        _SCHEDULER.local_now = lambda offset_hours=8: self._moment
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        _SCHEDULER.local_now = self._original
+        return False
 
 
-def _make_sched_cfg(base_dir: Path, *, persist_state: bool) -> SimpleNamespace:
+def _make_sched_cfg(
+    base_dir: Path,
+    *,
+    persist_state: bool,
+    retry_enabled: bool = True,
+    retry_max_attempts: int = 3,
+    retry_base_minutes: int = 10,
+    retry_max_delay_minutes: int = 120,
+) -> SimpleNamespace:
     """构造 scheduler 所需的最小 config（SimpleNamespace 替代 Pydantic）。"""
     return SimpleNamespace(
         output=SimpleNamespace(base_dir=str(base_dir)),
@@ -1052,6 +1133,12 @@ def _make_sched_cfg(base_dir: Path, *, persist_state: bool) -> SimpleNamespace:
             persist_state=persist_state,
             timezone_offset_hours=8,
             check_interval_seconds=60,
+        ),
+        retry=SimpleNamespace(
+            enabled=retry_enabled,
+            max_attempts=retry_max_attempts,
+            base_delay_minutes=retry_base_minutes,
+            max_delay_minutes=retry_max_delay_minutes,
         ),
     )
 
@@ -1075,21 +1162,59 @@ class _RecordingNotifier:
 
 
 class _RecordingPipeline:
-    """记录生成调用的假 pipeline（类级 calls 列表，取回 scheduler 内部构造的实例的记录）。"""
+    """记录生成调用的假 pipeline。
+
+    ``outcomes`` 是返回值队列：每次调用弹出队首；队列空时回退为成功。
+    测试通过 ``_RecordingPipelineCtx`` 编排失败/成功序列。
+    """
 
     calls: list = []
+    outcomes: list = []
+    success_writer = None
 
     def __init__(self, plugin) -> None:
         pass
 
     async def generate_for_date(self, date: str):
         _RecordingPipeline.calls.append(date)
-        return True, "ok"
+        if _RecordingPipeline.outcomes:
+            outcome = _RecordingPipeline.outcomes.pop(0)
+        else:
+            outcome = (True, "ok", False)
+        # 模拟真机：生成成功会落盘日记记录（跟进补推据此判定）
+        if outcome[0] and _RecordingPipeline.success_writer is not None:
+            await _RecordingPipeline.success_writer(date)
+        return outcome
 
 
-def _make_scheduler(tmp_path: Path, *, persist_state: bool):
+class _RecordingPipelineCtx:
+    """临时代替 scheduler 模块内的 DiaryPipeline 类。"""
+
+    def __init__(self, outcomes, success_writer=None) -> None:
+        self._outcomes = list(outcomes)
+        self._success_writer = success_writer
+        self._original = None
+
+    def __enter__(self) -> type:
+        _RecordingPipeline.calls = []
+        _RecordingPipeline.outcomes = list(self._outcomes)
+        _RecordingPipeline.success_writer = self._success_writer
+        self._original = _SCHEDULER.DiaryPipeline
+        _SCHEDULER.DiaryPipeline = _RecordingPipeline
+        return _RecordingPipeline
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        _SCHEDULER.DiaryPipeline = self._original
+        _RecordingPipeline.outcomes = []
+        _RecordingPipeline.success_writer = None
+        return False
+
+
+def _make_scheduler(tmp_path: Path, *, persist_state: bool, **cfg_kwargs):
     """构造 scheduler，并把 notifier 替换为记录型假件。"""
-    plugin = SimpleNamespace(config=_make_sched_cfg(tmp_path, persist_state=persist_state))
+    plugin = SimpleNamespace(
+        config=_make_sched_cfg(tmp_path, persist_state=persist_state, **cfg_kwargs)
+    )
     sched = DiaryScheduler(plugin)
     sched._notifier = _RecordingNotifier()
     return sched
@@ -1097,41 +1222,63 @@ def _make_scheduler(tmp_path: Path, *, persist_state: bool):
 
 def _run_recover_with_recording(sched):
     """用记录型假 pipeline 类替换后跑一次启动补跑（_maybe_recover），返回该假类。"""
-    _RecordingPipeline.calls = []
-    original = _SCHEDULER.DiaryPipeline
-    _SCHEDULER.DiaryPipeline = _RecordingPipeline
-    try:
+    with _RecordingPipelineCtx([(True, "ok", False)]) as fake:
         asyncio.run(sched._maybe_recover((4, 0), (8, 0)))
-    finally:
-        _SCHEDULER.DiaryPipeline = original
-    return _RecordingPipeline
+    return fake
 
 
-def _seed_diary(storage: DiaryStorage, date: str, *, status: str) -> None:
-    """向临时 storage 写入指定日期/状态的日记。"""
+def _diary_payload(date: str, *, status: str, generation_time: float) -> dict:
+    """构造一条日记记录（成功/报错两种形态）。"""
     success = status == "生成成功"
-    asyncio.run(storage.save_diary(
-        {
-            "date": date,
-            "status": status,
-            "word_count": 100 if success else 0,
-            "weather": "晴" if success else "阴",
-            "diary_content": "昨天的日记" if success else "",
-            "error_message": "" if success else "原因:消息数不足",
-            "generation_time": 1.0,
-        }
-    ))
+    return {
+        "date": date,
+        "status": status,
+        "word_count": 100 if success else 0,
+        "weather": "晴" if success else "阴",
+        "diary_content": "昨天的日记" if success else "",
+        "error_message": "" if success else "原因:消息数不足",
+        "generation_time": generation_time,
+    }
+
+
+async def _seed_diary_async(
+    storage: DiaryStorage,
+    date: str,
+    *,
+    status: str,
+    generation_time: float = 1.0,
+) -> None:
+    """异步落盘一条日记（供事件循环内调用，如假 pipeline 的成功回调）。"""
+    await storage.save_diary(
+        _diary_payload(date, status=status, generation_time=generation_time)
+    )
+
+
+def _seed_diary(
+    storage: DiaryStorage,
+    date: str,
+    *,
+    status: str,
+    generation_time: float = 1.0,
+) -> None:
+    """向临时 storage 写入指定日期/状态的日记。
+
+    同一日期需要多条记录时用递增的 ``generation_time``（决定文件名与"最新"判定）。
+    """
+    asyncio.run(
+        _seed_diary_async(storage, date, status=status, generation_time=generation_time)
+    )
 
 
 def test_restart_no_regen_no_repush_persist_off(tmp_path: Path):
     """回归（用户真机场景）：persist_state=false + 昨天已生成已推送 → 重启零动作。"""
-    yesterday = _yesterday()
     sched = _make_scheduler(tmp_path, persist_state=False)
-    sched._storage.write_last_diary_date(yesterday)
-    sched._storage.write_last_pushed_date(yesterday)
-    _seed_diary(sched._storage, yesterday, status="生成成功")
+    sched._storage.write_last_diary_date(_FROZEN_YESTERDAY)
+    sched._storage.write_last_pushed_diary_date(_FROZEN_YESTERDAY)
+    _seed_diary(sched._storage, _FROZEN_YESTERDAY, status="生成成功")
 
-    fake = _run_recover_with_recording(sched)
+    with _FrozenClock(_FROZEN_NOW):
+        fake = _run_recover_with_recording(sched)
 
     assert fake.calls == [], "已有日记数据，不应重新生成"
     assert sched._notifier.sent == [], "已推送的日记不应被重新推送"
@@ -1139,26 +1286,26 @@ def test_restart_no_regen_no_repush_persist_off(tmp_path: Path):
 
 def test_restart_no_regen_no_repush_persist_on(tmp_path: Path):
     """persist_state=true 时行为一致：解耦后开关不再影响防重复正确性。"""
-    yesterday = _yesterday()
     sched = _make_scheduler(tmp_path, persist_state=True)
-    sched._storage.write_last_diary_date(yesterday)
-    sched._storage.write_last_pushed_date(yesterday)
-    _seed_diary(sched._storage, yesterday, status="生成成功")
+    sched._storage.write_last_diary_date(_FROZEN_YESTERDAY)
+    sched._storage.write_last_pushed_diary_date(_FROZEN_YESTERDAY)
+    _seed_diary(sched._storage, _FROZEN_YESTERDAY, status="生成成功")
 
-    fake = _run_recover_with_recording(sched)
+    with _FrozenClock(_FROZEN_NOW):
+        fake = _run_recover_with_recording(sched)
 
     assert fake.calls == [], "已有日记数据，不应重新生成"
     assert sched._notifier.sent == [], "已推送的日记不应被重新推送"
 
 
 def test_restart_no_repush_for_failed_diary(tmp_path: Path):
-    """报错日记按设计只推一次：重启不重生成、不重复推失败消息。"""
-    yesterday = _yesterday()
+    """报错日记 + 无重试预算：重启不重生成、不重复推失败消息。"""
     sched = _make_scheduler(tmp_path, persist_state=False)
-    sched._storage.write_last_pushed_date(yesterday)
-    _seed_diary(sched._storage, yesterday, status="报错:生成失败")
+    sched._storage.write_last_pushed_error_date(_FROZEN_YESTERDAY)
+    _seed_diary(sched._storage, _FROZEN_YESTERDAY, status="报错:生成失败")
 
-    fake = _run_recover_with_recording(sched)
+    with _FrozenClock(_FROZEN_NOW):
+        fake = _run_recover_with_recording(sched)
 
     assert fake.calls == [], "报错日记也属于已有数据，不应重新生成"
     assert sched._notifier.sent == [], "失败消息已推送过，不应重复推送"
@@ -1166,47 +1313,399 @@ def test_restart_no_repush_for_failed_diary(tmp_path: Path):
 
 def test_restart_recovers_unpushed_diary_once(tmp_path: Path):
     """正常补推送不受影响：昨天日记存在但未推送 → 恰好推送一次并落状态。"""
-    yesterday = _yesterday()
     sched = _make_scheduler(tmp_path, persist_state=False)
-    _seed_diary(sched._storage, yesterday, status="生成成功")
+    _seed_diary(sched._storage, _FROZEN_YESTERDAY, status="生成成功")
 
-    fake = _run_recover_with_recording(sched)
+    with _FrozenClock(_FROZEN_NOW):
+        fake = _run_recover_with_recording(sched)
 
-    assert fake.calls == [], "已有日记数据，不应重新生成"
-    assert sched._notifier.sent == [("diary", yesterday)]
-    # persist_state=false 也必须写入 last_pushed_date（幂等的关键）
-    assert sched._storage.read_last_pushed_date() == yesterday
+        assert fake.calls == [], "已有日记数据，不应重新生成"
+        assert sched._notifier.sent == [("diary", _FROZEN_YESTERDAY)]
+        # persist_state=false 也必须写入推送状态（幂等的关键）
+        assert sched._storage.read_last_pushed_diary_date() == _FROZEN_YESTERDAY
 
-    # 再次重启（第二次补跑）：不再推送
-    fake2 = _run_recover_with_recording(sched)
+        # 再次重启（第二次补跑）：不再推送
+        fake2 = _run_recover_with_recording(sched)
     assert fake2.calls == []
-    assert sched._notifier.sent == [("diary", yesterday)]
+    assert sched._notifier.sent == [("diary", _FROZEN_YESTERDAY)]
 
 
 def test_recover_still_generates_when_diary_missing(tmp_path: Path):
     """数据存在性判定不误伤补生成：昨天无日记数据 → 补生成照常触发。"""
-    yesterday = _yesterday()
     sched = _make_scheduler(tmp_path, persist_state=False)
     # 即便 last_diary_date 标记声称已生成，数据缺失时仍以数据为准
-    sched._storage.write_last_diary_date(yesterday)
+    sched._storage.write_last_diary_date(_FROZEN_YESTERDAY)
 
-    fake = _run_recover_with_recording(sched)
+    with _FrozenClock(_FROZEN_NOW):
+        fake = _run_recover_with_recording(sched)
 
-    assert fake.calls == [yesterday]
+    assert fake.calls == [_FROZEN_YESTERDAY]
 
 
 def test_has_unpushed_yesterday_independent_of_persist_state(tmp_path: Path):
-    """推送候选判定：last_pushed_date 去重不依赖 persist_state。"""
-    yesterday = _yesterday()
+    """推送候选判定：双通道去重不依赖 persist_state。"""
     sched = _make_scheduler(tmp_path, persist_state=False)
-    sched._storage.write_last_pushed_date(yesterday)
-    _seed_diary(sched._storage, yesterday, status="生成成功")
+    sched._storage.write_last_pushed_diary_date(_FROZEN_YESTERDAY)
+    _seed_diary(sched._storage, _FROZEN_YESTERDAY, status="生成成功")
 
-    assert asyncio.run(sched._has_unpushed_yesterday()) is False
+    with _FrozenClock(_FROZEN_NOW):
+        assert asyncio.run(sched._has_unpushed_yesterday()) is False
 
-    # 未推送时判定为 True（正常补推送路径保留）
-    sched._storage.write_last_pushed_date("2000-01-01")
-    assert asyncio.run(sched._has_unpushed_yesterday()) is True
+        # 未推送时判定为 True（正常补推送路径保留）
+        sched._storage.write_last_pushed_diary_date("2000-01-01")
+        assert asyncio.run(sched._has_unpushed_yesterday()) is True
+
+
+# ===== 失败退避重试 =====
+
+
+def test_soft_failure_schedules_retry(tmp_path: Path):
+    """软失败（LLM 空返回）→ 登记首次退避重试并落盘。"""
+    sched = _make_scheduler(tmp_path, persist_state=False)
+    with _FrozenClock(_FROZEN_NOW):
+        with _RecordingPipelineCtx([(False, "模型生成日记失败（返回空）", True)]):
+            ok, _ = asyncio.run(
+                sched._generate_for_date_safe(_FROZEN_YESTERDAY, source="schedule")
+            )
+
+        assert ok is False
+        assert sched._retry is not None
+        assert sched._retry["date"] == _FROZEN_YESTERDAY
+        assert sched._retry["attempts_done"] == 0
+        # base=10 分钟 → 下次重试在 12:10
+        assert sched._retry["next_at"] == _FROZEN_NOW + datetime.timedelta(minutes=10)
+
+    persisted = sched._storage.read_retry_state()
+    assert persisted is not None
+    assert persisted["date"] == _FROZEN_YESTERDAY
+    assert persisted["attempts_done"] == 0
+    # 落盘时间戳按 time.time() 体系（剩余约 600 秒）
+    remaining = persisted["next_retry_ts"] - time.time()
+    assert 590 < remaining <= 600
+
+
+def test_hard_failure_not_retried(tmp_path: Path):
+    """消息数不足是硬失败：不入队、不写 retry_state。"""
+    sched = _make_scheduler(tmp_path, persist_state=False)
+    with _FrozenClock(_FROZEN_NOW):
+        with _RecordingPipelineCtx([(False, "消息数量不足(3/5)", False)]):
+            ok, msg = asyncio.run(
+                sched._generate_for_date_safe(_FROZEN_YESTERDAY, source="schedule")
+            )
+
+    assert ok is False
+    assert "消息数量不足" in msg
+    assert sched._retry is None
+    assert sched._storage.read_retry_state() is None
+
+
+def test_manual_failure_not_retried(tmp_path: Path):
+    """手动 /diary gen 的失败不进入自动重试队列（用户在场，可自行再跑）。"""
+    sched = _make_scheduler(tmp_path, persist_state=False)
+    with _FrozenClock(_FROZEN_NOW):
+        with _RecordingPipelineCtx([(False, "生成日记时出错: boom", True)]):
+            asyncio.run(
+                sched._generate_for_date_safe(_FROZEN_YESTERDAY, source="manual")
+            )
+
+    assert sched._retry is None
+    assert sched._storage.read_retry_state() is None
+
+
+def test_retry_disabled_no_schedule(tmp_path: Path):
+    """retry.enabled=false → 与旧版本一致，失败即放弃。"""
+    sched = _make_scheduler(tmp_path, persist_state=False, retry_enabled=False)
+    with _FrozenClock(_FROZEN_NOW):
+        with _RecordingPipelineCtx([(False, "模型生成日记失败（返回空）", True)]):
+            asyncio.run(
+                sched._generate_for_date_safe(_FROZEN_YESTERDAY, source="schedule")
+            )
+
+    assert sched._retry is None
+    assert sched._storage.read_retry_state() is None
+
+
+def test_retry_backoff_sequence_and_cap(tmp_path: Path):
+    """退避序列 base×2^n 与 max_delay 封顶。"""
+    sched = _make_scheduler(tmp_path, persist_state=False)
+    assert sched._retry_delay_seconds(0) == 600       # 10 分钟
+    assert sched._retry_delay_seconds(1) == 1200      # 20 分钟
+    assert sched._retry_delay_seconds(2) == 2400      # 40 分钟
+    assert sched._retry_delay_seconds(5) == 7200      # 封顶 120 分钟
+
+
+def test_execute_retry_success_clears_state(tmp_path: Path):
+    """重试成功 → 清除内存与落盘状态。"""
+    sched = _make_scheduler(tmp_path, persist_state=False)
+    with _FrozenClock(_FROZEN_NOW):
+        sched._schedule_retry(_FROZEN_YESTERDAY, 0, _FROZEN_NOW)
+        with _RecordingPipelineCtx([(True, "ok", False)]) as fake:
+            asyncio.run(sched._execute_retry())
+
+    assert fake.calls == [_FROZEN_YESTERDAY]
+    assert sched._retry is None
+    assert sched._storage.read_retry_state() is None
+
+
+def test_execute_retry_advances_backoff(tmp_path: Path):
+    """第 1/2 次重试失败 → 次数递增、间隔按 20/40 分钟推进。"""
+    sched = _make_scheduler(tmp_path, persist_state=False)
+    failures = [(False, "模型生成日记失败（返回空）", True)] * 2
+    with _FrozenClock(_FROZEN_NOW):
+        sched._schedule_retry(_FROZEN_YESTERDAY, 0, _FROZEN_NOW)
+        with _RecordingPipelineCtx(failures):
+            asyncio.run(sched._execute_retry())
+            assert sched._retry["attempts_done"] == 1
+            assert sched._retry["next_at"] == _FROZEN_NOW + datetime.timedelta(minutes=20)
+
+            asyncio.run(sched._execute_retry())
+            assert sched._retry["attempts_done"] == 2
+            assert sched._retry["next_at"] == _FROZEN_NOW + datetime.timedelta(minutes=40)
+
+
+def test_execute_retry_budget_exhausted_clears_state(tmp_path: Path):
+    """3 次重试全失败 → 预算耗尽、状态清除（最终报错记录交由推送侧提醒）。"""
+    sched = _make_scheduler(tmp_path, persist_state=False)
+    failures = [(False, "模型生成日记失败（返回空）", True)] * 3
+    with _FrozenClock(_FROZEN_NOW):
+        sched._schedule_retry(_FROZEN_YESTERDAY, 0, _FROZEN_NOW)
+        with _RecordingPipelineCtx(failures) as fake:
+            asyncio.run(sched._execute_retry())
+            asyncio.run(sched._execute_retry())
+            asyncio.run(sched._execute_retry())
+
+    assert len(fake.calls) == 3, "首次 + 3 次重试共 4 次尝试中的 3 次重试"
+    assert sched._retry is None
+    assert sched._storage.read_retry_state() is None
+
+
+def test_execute_retry_skips_when_success_record_exists(tmp_path: Path):
+    """该日期已被手动 gen 修好 → 不消耗重试预算。"""
+    sched = _make_scheduler(tmp_path, persist_state=False)
+    _seed_diary(sched._storage, _FROZEN_YESTERDAY, status="生成成功")
+    with _FrozenClock(_FROZEN_NOW):
+        sched._schedule_retry(_FROZEN_YESTERDAY, 1, _FROZEN_NOW)
+        with _RecordingPipelineCtx([(True, "ok", False)]) as fake:
+            asyncio.run(sched._execute_retry())
+
+    assert fake.calls == []
+    assert sched._retry is None
+
+
+def test_retry_state_survives_reload(tmp_path: Path):
+    """落盘状态被新实例按"剩余秒数"恢复（不依赖墙钟时区换算）。"""
+    sched = _make_scheduler(tmp_path, persist_state=False)
+    with _FrozenClock(_FROZEN_NOW):
+        sched._schedule_retry(
+            _FROZEN_YESTERDAY, 2, _FROZEN_NOW + datetime.timedelta(minutes=40)
+        )
+
+    revived = _make_scheduler(tmp_path, persist_state=False)
+    with _FrozenClock(_FROZEN_NOW):
+        revived._load_retry_state()
+        assert revived._retry is not None
+        assert revived._retry["date"] == _FROZEN_YESTERDAY
+        assert revived._retry["attempts_done"] == 2
+        remaining = (revived._retry["next_at"] - _FROZEN_NOW).total_seconds()
+    assert 2390 < remaining <= 2400
+
+
+def test_recover_resumes_pending_retry(tmp_path: Path):
+    """重启续跑：报错记录 + 预算未尽 → 恢复重试（不在补跑阶段直接生成）。"""
+    sched = _make_scheduler(tmp_path, persist_state=False)
+    _seed_diary(sched._storage, _FROZEN_YESTERDAY, status="报错:生成失败")
+    with _FrozenClock(_FROZEN_NOW):
+        sched._schedule_retry(_FROZEN_YESTERDAY, 1, _FROZEN_NOW)
+        with _RecordingPipelineCtx([(True, "ok", False)]) as fake:
+            asyncio.run(sched._maybe_recover((4, 0), (8, 0)))
+
+    assert fake.calls == []
+    assert sched._retry is not None
+    assert sched._retry["attempts_done"] == 1
+
+
+def test_recover_skips_exhausted_retry(tmp_path: Path):
+    """预算耗尽的报错记录：丢弃状态且不补生成（维持 e9c80cc 防重复语义）。"""
+    sched = _make_scheduler(tmp_path, persist_state=False)
+    _seed_diary(sched._storage, _FROZEN_YESTERDAY, status="报错:生成失败")
+    with _FrozenClock(_FROZEN_NOW):
+        sched._schedule_retry(_FROZEN_YESTERDAY, 3, _FROZEN_NOW)
+        with _RecordingPipelineCtx([(True, "ok", False)]) as fake:
+            asyncio.run(sched._maybe_recover((4, 0), (8, 0)))
+
+    assert fake.calls == []
+    assert sched._retry is None
+    assert sched._storage.read_retry_state() is None
+
+
+def test_recover_discards_stale_retry_state(tmp_path: Path):
+    """日期不匹配的旧重试状态被丢弃。"""
+    sched = _make_scheduler(tmp_path, persist_state=False)
+    with _FrozenClock(_FROZEN_NOW):
+        sched._schedule_retry("2026-01-01", 0, _FROZEN_NOW)
+        with _RecordingPipelineCtx([(True, "ok", False)]) as fake:
+            asyncio.run(sched._maybe_recover((4, 0), (8, 0)))
+
+    assert sched._retry is None
+    assert sched._storage.read_retry_state() is None
+    # 旧状态被丢弃后，走常规补生成路径（而不是续跑旧日期的重试）
+    assert fake.calls == [_FROZEN_YESTERDAY]
+
+
+# ===== 推送双通道限额 =====
+
+
+def test_push_error_then_diary_both_once(tmp_path: Path):
+    """双通道独立限额：同日期先推失败消息，修好后仍可推一次日记。"""
+    sched = _make_scheduler(tmp_path, persist_state=False)
+    _seed_diary(sched._storage, _FROZEN_YESTERDAY, status="报错:生成失败", generation_time=1.0)
+
+    with _FrozenClock(_FROZEN_NOW):
+        asyncio.run(sched._push_safe(source="test"))
+        assert sched._notifier.sent == [("failure", _FROZEN_YESTERDAY)]
+
+        # 同状态重复推送 → 被失败通道限额拦住
+        asyncio.run(sched._push_safe(source="test"))
+        assert sched._notifier.sent == [("failure", _FROZEN_YESTERDAY)]
+
+        # 手动重生成成功（写入更新的记录）→ 日记通道仍可推一次
+        _seed_diary(sched._storage, _FROZEN_YESTERDAY, status="生成成功", generation_time=2.0)
+        asyncio.run(sched._push_safe(source="test"))
+        assert sched._notifier.sent == [
+            ("failure", _FROZEN_YESTERDAY),
+            ("diary", _FROZEN_YESTERDAY),
+        ]
+
+        # 两通道都已推过 → 再推无动作
+        asyncio.run(sched._push_safe(source="test"))
+        assert len(sched._notifier.sent) == 2
+
+
+def test_push_deferred_while_retry_pending(tmp_path: Path):
+    """重试挂起时推送顺延：避免"刚推失败消息，重试就成功"。"""
+    sched = _make_scheduler(tmp_path, persist_state=False)
+    _seed_diary(sched._storage, _FROZEN_YESTERDAY, status="报错:生成失败")
+    with _FrozenClock(_FROZEN_NOW):
+        sched._schedule_retry(_FROZEN_YESTERDAY, 0, _FROZEN_NOW)
+        asyncio.run(sched._push_safe(source="test"))
+
+    assert sched._notifier.sent == []
+    assert sched._storage.read_last_pushed_error_date() is None
+
+
+def test_followup_push_after_retry_success(tmp_path: Path):
+    """重试在 push_time 之后成功 → 立即补推日记一次。"""
+    sched = _make_scheduler(tmp_path, persist_state=False)
+    _seed_diary(sched._storage, _FROZEN_YESTERDAY, status="报错:生成失败")
+
+    async def write_success(date: str) -> None:
+        await _seed_diary_async(
+            sched._storage, date, status="生成成功", generation_time=9.0
+        )
+
+    with _FrozenClock(_FROZEN_NOW):
+        sched._schedule_retry(_FROZEN_YESTERDAY, 0, _FROZEN_NOW)
+        with _RecordingPipelineCtx([(True, "ok", False)], success_writer=write_success):
+            asyncio.run(sched._execute_retry())
+
+    assert sched._retry is None
+    assert sched._notifier.sent == [("diary", _FROZEN_YESTERDAY)]
+    assert sched._storage.read_last_pushed_diary_date() == _FROZEN_YESTERDAY
+
+
+def test_no_followup_push_before_push_time(tmp_path: Path):
+    """重试在 push_time 之前成功 → 不立即推，交由调度器到点推送。"""
+    sched = _make_scheduler(tmp_path, persist_state=False)
+    _seed_diary(sched._storage, _FROZEN_YESTERDAY, status="报错:生成失败")
+
+    async def write_success(date: str) -> None:
+        await _seed_diary_async(
+            sched._storage, date, status="生成成功", generation_time=9.0
+        )
+
+    early = datetime.datetime(2026, 9, 11, 6, 0, 0)
+    with _FrozenClock(early):
+        sched._schedule_retry(_FROZEN_YESTERDAY, 0, early)
+        with _RecordingPipelineCtx([(True, "ok", False)], success_writer=write_success):
+            asyncio.run(sched._execute_retry())
+
+    assert sched._notifier.sent == []
+    assert sched._storage.read_last_pushed_diary_date() is None
+
+
+def test_push_now_bypasses_limit_and_marks_state(tmp_path: Path):
+    """手动推送：显式意图不受限额拦截，但成功后写状态防自动重复。"""
+    sched = _make_scheduler(tmp_path, persist_state=False)
+    _seed_diary(sched._storage, _FROZEN_YESTERDAY, status="生成成功")
+    with _FrozenClock(_FROZEN_NOW):
+        # 模拟当日已自动推过日记
+        sched._storage.write_last_pushed_diary_date(_FROZEN_YESTERDAY)
+        ok, msg = asyncio.run(sched.push_now(_FROZEN_YESTERDAY))
+
+    assert ok is True
+    assert sched._notifier.sent == [("diary", _FROZEN_YESTERDAY)]
+    assert "已推送" in msg
+
+
+def test_push_now_reports_missing_record(tmp_path: Path):
+    """手动推送：该日期无记录 → 明确回报，不静默。"""
+    sched = _make_scheduler(tmp_path, persist_state=False)
+    with _FrozenClock(_FROZEN_NOW):
+        ok, msg = asyncio.run(sched.push_now(_FROZEN_YESTERDAY))
+
+    assert ok is False
+    assert "没有日记记录" in msg
+
+
+def test_push_now_reports_unconfigured_notifier(tmp_path: Path):
+    """手动推送：ntfy 未配置 → 明确回报。"""
+    sched = _make_scheduler(tmp_path, persist_state=False)
+    sched._notifier = NtfyNotifier(_make_ntfy_cfg(enabled=False))
+    ok, msg = asyncio.run(sched.push_now(_FROZEN_YESTERDAY))
+
+    assert ok is False
+    assert "未启用" in msg
+
+
+def test_push_now_error_record_uses_failure_channel(tmp_path: Path):
+    """手动推送报错记录 → 走失败通道并写失败状态。"""
+    sched = _make_scheduler(tmp_path, persist_state=False)
+    _seed_diary(sched._storage, _FROZEN_YESTERDAY, status="报错:生成失败")
+    with _FrozenClock(_FROZEN_NOW):
+        ok, msg = asyncio.run(sched.push_now(_FROZEN_YESTERDAY))
+
+    assert ok is True
+    assert sched._notifier.sent == [("failure", _FROZEN_YESTERDAY)]
+    assert sched._storage.read_last_pushed_error_date() == _FROZEN_YESTERDAY
+    assert "失败消息" in msg
+
+
+def test_push_skips_error_channel_when_send_on_failure_off(tmp_path: Path):
+    """send_on_failure=false → 报错记录不推失败消息，也不写状态。"""
+    sched = _make_scheduler(tmp_path, persist_state=False)
+    sched._notifier = _RecordingNotifier()
+    sched._cfg.ntfy.send_on_failure = False
+    _seed_diary(sched._storage, _FROZEN_YESTERDAY, status="报错:生成失败")
+    with _FrozenClock(_FROZEN_NOW):
+        asyncio.run(sched._push_safe(source="test"))
+
+    assert sched._notifier.sent == []
+    assert sched._storage.read_last_pushed_error_date() is None
+
+
+def test_status_exposes_retry_and_push_channels(tmp_path: Path):
+    """/diary status 快照包含重试状态与双通道推送日期。"""
+    sched = _make_scheduler(tmp_path, persist_state=False)
+    with _FrozenClock(_FROZEN_NOW):
+        sched._schedule_retry(
+            _FROZEN_YESTERDAY, 1, _FROZEN_NOW + datetime.timedelta(minutes=20)
+        )
+        status = sched.get_status()
+
+    assert _FROZEN_YESTERDAY in status["retry_state"]
+    assert "1/3" in status["retry_state"]
+    assert status["last_pushed_diary_date"] == "无"
+    assert status["last_pushed_error_date"] == "无"
 
 
 # ===== 独立运行入口（不依赖 pytest） =====

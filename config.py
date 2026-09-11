@@ -125,6 +125,46 @@ class ScheduleSection(PluginConfigBase):
     )
 
 
+class RetrySection(PluginConfigBase):
+    """软失败退避重试设置。
+
+    仅对**软失败**生效（LLM 返回空 / LLM 超时 / 生成异常）；
+    「消息数量不足」属硬失败——时间窗已闭合，重试不会改变结果，不重试。
+    手动 `/diary gen` 触发的失败也不进入重试队列（用户在场，可自行决定是否再跑）。
+    """
+
+    __ui_label__: ClassVar[str] = "重试"
+    __ui_icon__: ClassVar[str] = "rotate-ccw"
+    __ui_order__: ClassVar[int] = 8
+
+    enabled: bool = Field(
+        default=True,
+        description="是否启用软失败退避重试。关闭后行为与旧版本一致（失败即放弃）。",
+        json_schema_extra={"label": "启用重试", "order": 1},
+    )
+    max_attempts: int = Field(
+        default=3,
+        ge=0,
+        le=10,
+        description="重试次数上限（不含首次尝试）。3 = 最多再试 3 次，成功即停止。",
+        json_schema_extra={"label": "最大重试次数", "hint": "不含首次；0=不重试", "order": 2},
+    )
+    base_delay_minutes: int = Field(
+        default=10,
+        ge=1,
+        le=1440,
+        description="退避基数（分钟）。第 n 次重试前等待 base × 2^(n-1)，默认 10 → 10/20/40 分钟。",
+        json_schema_extra={"label": "退避基数", "hint": "分钟；默认 10 → 10/20/40", "order": 3},
+    )
+    max_delay_minutes: int = Field(
+        default=120,
+        ge=1,
+        le=10080,
+        description="单次退避上限（分钟），防止基数调大后等待过久或跨天。",
+        json_schema_extra={"label": "退避上限", "hint": "分钟", "order": 4},
+    )
+
+
 class MessageSection(PluginConfigBase):
     """消息来源设置。"""
 
@@ -558,11 +598,13 @@ class MaiDiaryPluginConfig(PluginConfigBase):
     output: OutputSection = Field(default_factory=OutputSection)
     ntfy: NtfySection = Field(default_factory=NtfySection)
     narrative: NarrativeSection = Field(default_factory=NarrativeSection)
+    retry: RetrySection = Field(default_factory=RetrySection)
 
 
 __all__ = [
     "PluginSection",
     "ScheduleSection",
+    "RetrySection",
     "MessageSection",
     "SummarySection",
     "LLMSection",
