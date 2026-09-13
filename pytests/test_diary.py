@@ -874,7 +874,8 @@ def _make_plugin_config(*, narrative_enabled: bool = True) -> Any:
             min_word_count=100,
             max_word_count=400,
         ),
-        narrative=SimpleNamespace(enabled=narrative_enabled),
+        # api_timeout_seconds 为 v1.4.0 起的真实字段（narrative_bridge 直读，fake 必须跟上）
+        narrative=SimpleNamespace(enabled=narrative_enabled, api_timeout_seconds=10),
         output=SimpleNamespace(base_dir="data/diary"),
         schedule=SimpleNamespace(generate_time="04:00", persist_state=False),
         message=SimpleNamespace(
