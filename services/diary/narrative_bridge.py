@@ -63,7 +63,8 @@ class NarrativeBridge:
     async def _call_api(self, api_name: str, **kwargs: Any) -> Optional[Dict[str, Any]]:
         """带超时与异常兜底的跨插件 API 调用。"""
         try:
-            timeout = max(2, int(getattr(self._cfg, "api_timeout_seconds", 0) or 10))
+            # api_timeout_seconds 是 config.py NarrativeSection 的确定字段（AGENTS.md 类属性规范）
+            timeout = max(2, int(self._cfg.api_timeout_seconds or 10))
             result = await asyncio.wait_for(
                 self._ctx.api.call(api_name, **kwargs),
                 timeout=timeout,
