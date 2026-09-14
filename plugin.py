@@ -8,8 +8,11 @@
 
 from __future__ import annotations
 
-import contextlib
+from pathlib import Path
 from typing import Any, ClassVar, Optional
+
+import contextlib
+import json
 
 from maibot_sdk import API, Command, MaiBotPlugin, PluginConfigBase
 
@@ -17,6 +20,27 @@ from .config import MaiDiaryPluginConfig
 from .utils import get_logger
 
 logger = get_logger(__name__)
+
+
+def _manifest_version(log: Any, manifest_path: Optional[Path] = None) -> str:
+    """从插件自带的 _manifest.json 读版本号。
+
+    背景（2026-09-14 踩坑）：加载日志曾把版本号写死成一个常量字符串（与 manifest
+    无关），传旧版本的 config.py 也会打印同样的文案，导致**每次部署都无法用日志
+    确认远端是否真的更新了**。故改读 manifest，与 narrative 侧口径一致；读取失败
+    一律返回"未知"并告警，不静默降级成某种看起来正常的固定版本。
+    """
+    path = manifest_path or (Path(__file__).parent / "_manifest.json")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        version = str(data.get("version") or "").strip()
+    except (OSError, ValueError) as exc:
+        log.warning("读取 _manifest.json 版本失败: %s", exc)
+        return "未知"
+    if not version:
+        log.warning("_manifest.json 缺少 version 字段")
+        return "未知"
+    return version
 
 
 class MaiDiaryPlugin(MaiBotPlugin):
@@ -51,8 +75,9 @@ class MaiDiaryPlugin(MaiBotPlugin):
             else "未启用"
         )
         self.ctx.logger.info(
-            "mai-diary v1 已加载（generate_time=%s, push_time=%s, "
+            "mai-diary v%s 已加载（generate_time=%s, push_time=%s, "
             "base_dir=%s, ntfy=%s）",
+            _manifest_version(self.ctx.logger),
             self.config.schedule.generate_time,
             self.config.schedule.push_time,
             self.config.output.base_dir,
