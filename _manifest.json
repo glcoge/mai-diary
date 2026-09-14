@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "id": "glcoge.mai-diary",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "name": "MaiBot 日记插件",
   "description": "每天 04:00 自动总结上一日 04:00 起的聊天记录，08:00 通过 ntfy 推送至手机，本地落盘 Markdown + JSON。失败时按指数退避自动重试，推送按频道每日限流。",
   "author": {

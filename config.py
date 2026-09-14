@@ -191,6 +191,8 @@ class MessageSection(PluginConfigBase):
             "label": "目标聊天",
             "hint": "每行一个，例 group:123456 或 private:1523640161",
             "placeholder": "group:123456\nprivate:1523640161",
+            # str 默认渲染成单行 <Input>：多行内容会被挤成一行，保存即损坏配置
+            "x-widget": "textarea",
             "rows": 4,
             "depends_on": "message.filter_mode",
             "depends_value": "whitelist",
@@ -270,6 +272,7 @@ class SummarySection(PluginConfigBase):
         json_schema_extra={
             "label": "自定义 prompt",
             "hint": "占位符见描述",
+            "x-widget": "textarea",
             "rows": 10,
             "depends_on": "summary.style",
             "depends_value": "custom",
@@ -384,6 +387,8 @@ class OutputSection(PluginConfigBase):
         description="Markdown 文件开头模板。可用占位符: {date}。",
         json_schema_extra={
             "label": "MD 开头模板",
+            # 默认值含 \n\n：单行 <Input> 会把换行挤掉，保存即损坏
+            "x-widget": "textarea",
             "rows": 2,
             "depends_on": "output.write_markdown",
             "depends_value": True,
@@ -395,6 +400,8 @@ class OutputSection(PluginConfigBase):
         description="Markdown 文件结尾模板。可用占位符: {generated_at}。",
         json_schema_extra={
             "label": "MD 结尾模板",
+            # 同上：默认值以 \n\n 开头，单行输入框会吞掉换行
+            "x-widget": "textarea",
             "rows": 2,
             "depends_on": "output.write_markdown",
             "depends_value": True,
@@ -437,6 +444,9 @@ class NtfySection(PluginConfigBase):
             "label": "主题（topic）",
             "hint": "手机 ntfy 客户端订阅此 topic",
             "placeholder": "mai-diary-xxxxxxxx",
+            # 公共 ntfy.sh 下 topic 名等价于密码 → WebUI 打码显示
+            # （仅界面遮蔽，config.toml 仍是明文，与 MaiBot 现有凭据存储一致）
+            "x-widget": "password",
             "order": 3,
         },
     )
@@ -446,16 +456,16 @@ class NtfySection(PluginConfigBase):
         json_schema_extra={
             "label": "访问令牌",
             "hint": "自建服务才需要",
+            "x-widget": "password",
             "order": 4,
         },
     )
-    priority: str = Field(
+    priority: Literal["min", "low", "default", "high", "urgent"] = Field(
         default="default",
-        description=(
-            "通知优先级。取值：min / low / default / high / urgent。"
-        ),
+        description="通知优先级。取值：min / low / default / high / urgent。",
         json_schema_extra={
             "label": "优先级",
+            "hint": "min / low / default / high / urgent",
             "placeholder": "default",
             "order": 5,
         },
@@ -494,6 +504,8 @@ class NtfySection(PluginConfigBase):
         ),
         json_schema_extra={
             "label": "正文尾巴模板",
+            # 默认值以 \n\n 开头：单行 <Input> 会剥离换行，保存即损坏
+            "x-widget": "textarea",
             "rows": 2,
             "order": 9,
         },
@@ -517,6 +529,7 @@ class NtfySection(PluginConfigBase):
         description="正文被截断时附加的提示。",
         json_schema_extra={
             "label": "截断提示",
+            "x-widget": "textarea",
             "rows": 2,
             "order": 11,
         },
