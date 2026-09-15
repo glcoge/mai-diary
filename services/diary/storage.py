@@ -10,6 +10,7 @@
 - ``data/diary/last_pushed_error_date.txt``   最近一次「失败消息」推送日期（同上，双通道独立计数）
 - ``data/diary/last_pushed_date.txt``         **旧版**单通道推送标记（只读回退，惰性迁移）
 - ``data/diary/retry_state.json``             软失败退避重试状态（崩溃后据其续跑）
+- ``data/diary/errors/YYYY-MM-DD.log``        生成失败的完整报错（追加，含堆栈与上下文）
 
 推送状态为**双通道**：同一日记日期最多推 1 条正常日记 + 1 条失败消息，互不占用配额。
 旧版 ``last_pushed_date.txt`` 不再写入；读取新文件缺失时回退读它（视为两个通道都已推送过
@@ -45,6 +46,7 @@ class DiaryStorage:
             self._base = plugin_root / self._base
         self.json_dir = self._base / "json"
         self.markdown_dir = self._base / "markdown"
+        self.error_dir = self._base / "errors"
         self.index_file = self._base / "diary_index.json"
         self._state_file = self._base / "last_diary_date.txt"
         self._diary_push_state_file = self._base / "last_pushed_diary_date.txt"
@@ -55,9 +57,30 @@ class DiaryStorage:
         self._base.mkdir(parents=True, exist_ok=True)
         self.json_dir.mkdir(parents=True, exist_ok=True)
         self.markdown_dir.mkdir(parents=True, exist_ok=True)
+        self.error_dir.mkdir(parents=True, exist_ok=True)
         self.index_file.parent.mkdir(parents=True, exist_ok=True)
 
     # ===== 写入 =====
+
+    def append_error_log(self, date: str, detail: str) -> str:
+        """把一次失败的**完整**报错追加写入 ``errors/YYYY-MM-DD.log``。
+
+        JSON 里的 ``error_message`` 只留一行短原因（它要推 ntfy、要在命令里显示，
+        塞堆栈会撑爆 4KB），完整信息 —— 异常堆栈 + 模型名 / 超时 / prompt 长度等
+        排查上下文 —— 单独落到这里。同一天多次失败**追加而非覆盖**，保留重试过程。
+
+        Returns:
+            写入的路径；写入失败返回空串（不抛异常，绝不阻塞主流程）。
+        """
+        path = self.error_dir / f"{format_date_str(date)}.log"
+        stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            with path.open("a", encoding="utf-8") as f:
+                f.write(f"[{stamp}] {detail.rstrip()}\n")
+            return str(path)
+        except Exception as exc:
+            logger.error("写错误日志失败: %s", exc)
+            return ""
 
     async def save_diary(
         self,

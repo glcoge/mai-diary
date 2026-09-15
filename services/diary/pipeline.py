@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime
 import random
 import time
+import traceback
 from typing import Any, Dict, List, Optional, Tuple
 
 from ...utils import (
@@ -232,12 +233,29 @@ class DiaryPipeline:
             if self._cfg.llm.show_prompt:
                 logger.info("日记 prompt（前 500 字）: %s", prompt[:500])
 
-            content = await self._call_model(prompt)
-            if not content:
-                await self._save_failed(date, weather, "模型返回空内容", timeline_builder.stats)
-                return False, "模型生成日记失败（返回空）", True
+            ok, text = await self._call_model(prompt)
+            if not ok:
+                # text 此时是**具体失败原因**（超时秒数 / 异常文本 / success=False 的
+                # error）——2026-09-15 之前这一步被写成 ``text if success else ""``，
+                # 原因被吞掉，导致落盘与推送只能报一句"模型返回空内容"。
+                reason = (text or "").strip() or "模型调用失败（未返回原因）"
+                await self._save_failed(
+                    date, weather, reason, timeline_builder.stats,
+                    detail=self._error_detail(reason, len(prompt)),
+                )
+                return False, f"模型生成日记失败：{reason}", True
 
-            content = content.strip()
+            content = (text or "").strip()
+            if not content:
+                # 与上一种"空"区分开：调用成功但正文为空，排查方向完全不同
+                # （多半是模型侧被截断 / 输出被过滤，而不是网络或超时）
+                reason = "模型返回空内容（调用成功但正文为空）"
+                await self._save_failed(
+                    date, weather, reason, timeline_builder.stats,
+                    detail=self._error_detail(reason, len(prompt)),
+                )
+                return False, f"模型生成日记失败：{reason}", True
+
             if len(content) > max_wc:
                 content = smart_truncate(content, max_wc)
 
@@ -280,16 +298,36 @@ class DiaryPipeline:
         except Exception as exc:
             logger.error("生成日记失败: %s", exc, exc_info=True)
             try:
-                await self._save_failed(date, "阴", str(exc), {"bot_messages": 0, "user_messages": 0})
+                await self._save_failed(
+                    date, "阴", str(exc), {"bot_messages": 0, "user_messages": 0},
+                    detail=self._error_detail(str(exc), 0, stack=traceback.format_exc()),
+                )
             except Exception:
                 pass
             return False, f"生成日记时出错: {exc}", True
 
-    async def _call_model(self, prompt: str) -> str:
-        success, text = await self._llm.generate(
+    async def _call_model(self, prompt: str) -> Tuple[bool, str]:
+        """调用模型，返回 ``(ok, text_or_reason)``。
+
+        失败时第二个返回值是**具体原因**，必须由调用方带出去
+        （落盘 + 推送 + 错误日志），不要再吞成空串。
+        """
+        return await self._llm.generate(
             prompt, temperature=self._cfg.llm.temperature, max_tokens=4096
         )
-        return text if success else ""
+
+    def _error_detail(self, reason: str, prompt_chars: int, stack: str = "") -> str:
+        """拼完整报错：短原因 + 排查上下文（+ 异常堆栈），供 errors/*.log 落盘。"""
+        parts = [
+            reason,
+            f"model={self._cfg.llm.text_model}",
+            f"timeout={self._cfg.llm.timeout_seconds}s",
+            f"truncate_tokens={self._cfg.llm.truncate_tokens}",
+            f"prompt_chars={prompt_chars}",
+        ]
+        if stack:
+            parts.append("堆栈:\n" + stack)
+        return "\n".join(parts)
 
     async def _save_failed(
         self,
@@ -297,7 +335,15 @@ class DiaryPipeline:
         weather: str,
         error_message: str,
         stats: Dict[str, int],
+        detail: str = "",
     ) -> None:
+        """保存失败记录。
+
+        ``error_message`` 只放一行短原因（要推 ntfy）；``detail`` 是完整报错
+        （含堆栈与上下文），单独追加到 ``errors/YYYY-MM-DD.log``。
+        """
+        # 完整报错先落盘：即便下面 save_diary 也失败，也不至于连原因一起丢
+        self._storage.append_error_log(date, detail or error_message)
         try:
             await self._storage.save_diary(
                 {

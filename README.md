@@ -27,6 +27,9 @@ plugins/glcoge-mai-diary/data/diary/markdown/YYYY-MM-DD.md
 - 落盘两份：
   - `data/diary/markdown/YYYY-MM-DD.md`（**仅本地留存**，不通过任何接口输出）
   - `data/diary/json/YYYY-MM-DD_HHMMSS.json`（结构化记录）
+- 生成失败时：`error_message` 记一行短原因（用于 ntfy 推送），**完整报错**
+  （含异常堆栈 + 模型名 / 超时 / prompt 长度）追加到
+  `data/diary/errors/YYYY-MM-DD.log`，同一天多次失败追加不覆盖
 - 每天 **08:00** 通过 ntfy 推送至手机（可配 `schedule.push_time`，可关闭）
 - 提供命令：`/diary help|gen|push|ls|v|status`（仅返回元信息；需在 `admin_qq` 白名单中）
 - 提供 API：`generate_diary_api`（仅返回元信息；不含 content）

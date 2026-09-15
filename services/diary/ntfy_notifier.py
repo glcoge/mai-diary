@@ -145,7 +145,7 @@ class NtfyNotifier:
             logger.warning("ntfy 失败标题模板渲染失败: %s", exc)
             title = f"❌ 日记生成失败  {date}"
 
-        body = (
+        body = self._limit_body(
             f"日记生成失败：{error}\n\n"
             f"可执行 /diary gen {date} 手动重试。\n\n"
             "—— mai-diary"
@@ -157,6 +157,21 @@ class NtfyNotifier:
             priority=self._cfg.priority or "default",
             tags=list(self._cfg.tags or []),
             click=(self._cfg.click_action or "").strip() or None,
+        )
+
+    def _limit_body(self, text: str) -> str:
+        """按 ``max_body_chars`` 截断。
+
+        失败通知原本**没有**长度约束 —— 2026-09-15 起 error 换成了真实 API 报错
+        （可能带大段文本 / 堆栈），不截断会超过公共 ntfy.sh 约 4KB 的 body 上限
+        而被 413 拒收，连失败通知都收不到。
+        """
+        max_chars = max(50, int(self._cfg.max_body_chars or 2000))
+        if len(text) <= max_chars:
+            return text
+        return (
+            smart_truncate(text, max_chars)
+            + "\n\n…（已截断，完整报错见 data/diary/errors/）"
         )
 
     def _build_body(self, content: str, word_count: int) -> str:
