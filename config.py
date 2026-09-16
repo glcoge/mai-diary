@@ -78,10 +78,15 @@ class ScheduleSection(PluginConfigBase):
 
     generate_time: str = Field(
         default="04:00",
-        description="每日触发生成的时间（24h，HH:MM）。",
+        description=(
+            "每日触发生成的时间（24h，HH:MM）。它**同时决定日记时间窗的切割小时**："
+            "默认 04:00 → 窗口为 [昨日 04:00, 今日 04:00)。"
+            "⚠️ 改成其他小时时，内置 prompt 里「回顾昨天 04:00 到今天 04:00」的"
+            "说明不会自动跟随，请配合 style=custom 自定义 prompt。"
+        ),
         json_schema_extra={
             "label": "生成时间",
-            "hint": "HH:MM 24 小时制",
+            "hint": "HH:MM 24 小时制；同时决定时间窗切割小时",
             "placeholder": "04:00",
             "order": 1,
         },
@@ -100,10 +105,14 @@ class ScheduleSection(PluginConfigBase):
         default=60,
         ge=5,
         le=3600,
-        description="调度循环检查间隔（秒）。越小越精准但更耗 CPU。",
+        description=(
+            "调度循环的兜底睡眠间隔（秒）。⚠️ 正常路径下调度器会算出最近的"
+            "generate/push/retry 时刻并精确唤醒，调小本值**不会**提高触发精度；"
+            "它只在无候选动作或发生异常时兜底生效。"
+        ),
         json_schema_extra={
             "label": "检查间隔",
-            "hint": "秒；建议 30-120",
+            "hint": "秒；仅在无候选/异常时兜底，不影响触发精度",
             "order": 3,
         },
     )
@@ -111,17 +120,31 @@ class ScheduleSection(PluginConfigBase):
         default=8,
         ge=-12,
         le=14,
-        description="时区偏移（小时，UTC+）。影响 generate_time / push_time 解释、日期归属与窗口划分。",
+        description=(
+            "时区偏移（小时，UTC+）。影响 generate_time / push_time 解释、"
+            "日期归属与窗口划分。"
+            "⚠️ 宿主机系统时区已正确设置为目标时区、或系统时区为 UTC 时，"
+            "本项不生效（引擎直接信墙钟）。Docker 容器常注册为 UTC，"
+            "此时填 8 不会得到 UTC+8，请直接改容器时区。"
+        ),
         json_schema_extra={
             "label": "时区偏移",
-            "hint": "例：UTC+8 = 8、UTC-5 = -5",
+            "hint": "例：UTC+8 = 8、UTC-5 = -5；⚠️ 系统为 UTC 时不生效",
             "order": 4,
         },
     )
     persist_state: bool = Field(
         default=True,
-        description="已废弃（保留兼容）：防重复幂等判定始终生效，不再受此开关控制。",
-        json_schema_extra={"label": "持久化状态（已废弃）", "order": 5},
+        description=(
+            "已废弃（保留兼容）：防重复幂等判定始终生效，不再受此开关控制。"
+            "可忽略，建议保持默认。"
+        ),
+        json_schema_extra={
+            "label": "持久化状态（已废弃，可忽略）",
+            # 死字段：代码里零读取。标 hidden 避免用户在配置页误以为它能控制什么
+            "hidden": True,
+            "order": 5,
+        },
     )
 
 
@@ -246,15 +269,21 @@ class SummarySection(PluginConfigBase):
         default=250,
         ge=20,
         le=8000,
-        description="日记最少字数。",
-        json_schema_extra={"label": "最少字数", "hint": "20-8000", "order": 1},
+        description=(
+            "目标字数下限。与 max_word_count 一起，在区间内随机取一个目标值写进 prompt。"
+            "⚠️ 不是硬性下限：模型写少了不会补写或重生成。"
+        ),
+        json_schema_extra={"label": "最少字数", "hint": "20-8000；仅作 prompt 目标值", "order": 1},
     )
     max_word_count: int = Field(
         default=400,
         ge=20,
         le=8000,
-        description="日记最多字数。必须 ≥ min_word_count。",
-        json_schema_extra={"label": "最多字数", "hint": "20-8000；≥ 最少字数", "order": 2},
+        description=(
+            "目标字数上限，**这一条是硬上限**：超出会按句末截断。"
+            "必须 ≥ min_word_count（更小时自动取 min_word_count）。"
+        ),
+        json_schema_extra={"label": "最多字数", "hint": "20-8000；≥ 最少字数，超出截断", "order": 2},
     )
     style: Literal["diary", "brief", "custom"] = Field(
         default="diary",
@@ -268,13 +297,17 @@ class SummarySection(PluginConfigBase):
     custom_prompt: str = Field(
         default="",
         description=(
-            "自定义 prompt 模板（仅 style=custom 生效）。"
-            "占位符: {current_time}, {bot_personality}, {style_desc}, {timeline}, "
-            "{date_with_weather}, {target_length}, {self_description_line}"
+            "自定义 prompt 模板。⚠️ style=custom 与 style=brief 时都会生效"
+            "（brief 下会覆盖内置简短模板）；style=diary 时忽略本项。"
+            "可用占位符: {date}, {timeline}, {date_with_weather}, {target_length}, "
+            "{bot_personality}, {style_desc}, {self_description_line}, {current_time}, "
+            "{narrative_status}"
+            "（{narrative_status} 仅在剧本人设握手成功时非空；"
+            "未识别的占位符会被替换成空串）"
         ),
         json_schema_extra={
             "label": "自定义 prompt",
-            "hint": "占位符见描述",
+            "hint": "custom 与 brief 风格均生效；占位符见描述",
             "x-widget": "textarea",
             "rows": 10,
             # 2026-09-16 删除 depends_on / depends_value（死元数据，前端无组件读取）
@@ -283,8 +316,13 @@ class SummarySection(PluginConfigBase):
     )
     use_bot_personality: bool = Field(
         default=True,
-        description="是否注入主程序的 personality / expression 描述。",
-        json_schema_extra={"label": "注入 bot 人格", "order": 5},
+        description=(
+            "是否注入主程序的 personality / expression 描述。"
+            "⚠️ 关闭后还有两个连带影响：① 不再识别 bot 自身消息"
+            "（时间线里 bot 发言显示为昵称而非「我」，bot_messages 统计记 0）；"
+            "② 跳过剧本人设联动（日记不再使用剧本自我层人格）。"
+        ),
+        json_schema_extra={"label": "注入 bot 人格", "hint": "关闭会连带影响 bot 发言识别与剧本联动", "order": 5},
     )
     self_description: str = Field(
         default="",
@@ -306,12 +344,20 @@ class LLMSection(PluginConfigBase):
     __ui_order__: ClassVar[int] = 4
 
     text_model: str = Field(
-        default="replyer",
-        description="文本生成所用的 model task 名（需在主程序 model_config.toml 中存在）。",
+        default="",
+        description=(
+            "文本生成所用的**模型名**（不是任务名）。须与 WebUI「模型列表」中已注册的"
+            "模型名完全一致；留空则用主程序默认模型。"
+            "⚠️ 填任务名（如 replyer）会报「未找到名为 'X' 的模型」——"
+            "宿主只按模型名查找。"
+            "⚠️ 推理模型（glm-5.x 等默认开思考）跑日记长文本会返回空 choices，"
+            "请先在该模型的 extra_params 配 {thinking = {type = \"disabled\"}}。"
+        ),
         json_schema_extra={
-            "label": "模型 task",
-            "hint": "replyer / utils / planner 等",
-            "placeholder": "replyer",
+            "label": "模型名",
+            "hint": "填模型名而非任务名，如 glm-5.1；留空=用默认模型。"
+                   "推理模型请先关闭思考模式",
+            "placeholder": "glm-5.1",
             "order": 1,
         },
     )
@@ -327,9 +373,12 @@ class LLMSection(PluginConfigBase):
         ge=1000,
         le=200000,
         description=(
-            "timeline 在送入 LLM 前的最大 token 估算值。"
-            "超出后按句末截断。⚠️ host RPC 桥接层有 30s 硬上限，"
-            "若 LLM 经常超时，可把此值调小。"
+            "timeline 在送入 LLM 前的最大 token 估算值，超出后按句末截断。"
+            "⚠️ host RPC 桥接层有 30s 硬上限，若 LLM 经常超时，优先调小此值"
+            "（调小 timeout_seconds 无效）。"
+            "⚠️ 若报「模型返回空内容」或「choices 为空」，多半是所选模型默认开启"
+            "思考模式（如 glm-5.x），请在该模型的 extra_params 关闭思考，"
+            "或改用非推理模型。本插件输出侧 max_tokens 固定 4096，不可配置。"
         ),
         json_schema_extra={
             "label": "截断 token 上限",
@@ -342,12 +391,14 @@ class LLMSection(PluginConfigBase):
         ge=10,
         le=3600,
         description=(
-            "单次 LLM 调用的外层超时（秒）。⚠️ host RPC 桥接层有 30s 硬上限，"
-            "本字段 > 30 时仍可能被 RPC 先切断。"
+            "单次 LLM 调用的外层超时（秒）。"
+            "⚠️ host RPC 桥接层有 30s 硬上限：本字段超过 30 时**不起作用**，"
+            "实际生效上限就是 30s。调小它只是让客户端更早放弃，并不解决超时根因 ——"
+            "应改调小 truncate_tokens，或换用非推理模型。"
         ),
         json_schema_extra={
             "label": "LLM 超时",
-            "hint": "秒；⚠️ host RPC 30s 硬上限",
+            "hint": "秒；⚠️ 超过 30 无效（RPC 先切断）",
             "order": 4,
         },
     )

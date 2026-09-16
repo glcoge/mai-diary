@@ -51,8 +51,8 @@ admin_qq = ["123456"]
 generate_time = "04:00"
 push_time = "08:00"
 check_interval_seconds = 60
-timezone_offset_hours = 8
-persist_state = true
+timezone_offset_hours = 8    # ⚠️ 容器为 UTC 时不生效，请直接改容器时区
+# persist_state 已废弃（防重复幂等始终生效，不再受它控制），不再列出
 
 [message]
 filter_mode = "all"           # all / whitelist / blacklist
@@ -67,15 +67,19 @@ style = "diary"               # diary / brief / custom
 self_description = ""
 
 [llm]
-text_model = "replyer"
+# 填**模型名**（不是任务名），须与 WebUI「模型列表」中已注册的名称一致。
+# ⚠️ 填 "replyer" 这类任务名会报「未找到名为 'replyer' 的模型」。
+# ⚠️ 推理模型（glm-5.x 等默认开思考）会返回空 choices，请先关闭其思考模式。
+# 留空 = 用主程序默认模型。
+text_model = ""
 temperature = 0.7
-truncate_tokens = 50000       # 超过该 token 数会按句末截断
-timeout_seconds = 60          # 单次 LLM 调用超时
+truncate_tokens = 50000       # 超过该 token 数会按句末截断；调小它可缓解超时
+timeout_seconds = 60          # ⚠️ 超过 30 无效（host RPC 会先切断）
 
 [output]
 base_dir = "data/diary"
 write_markdown = true
-write_json = true
+# write_json 已移除：JSON 始终写入（/diary ls 与 /diary v 依赖它）
 
 [ntfy]
 enabled = false               # 默认关闭
@@ -114,7 +118,7 @@ max_delay_minutes = 120       # 单次重试延迟上限
 | 命令 | 说明 |
 |------|------|
 | `/diary help` | 查看帮助 |
-| `/diary gen [日期]` | 手动触发生成（默认昨天），返回字数 + 文件路径。**不**触发立即推送；将在下一次 `push_time` 统一推送 |
+| `/diary gen [日期]` | 手动触发生成（默认昨天），返回字数 + 文件路径。若当日 `push_time` 已过会**立即补推**一次；未到则等 `push_time` 统一推送 |
 | `/diary push [日期]` | 手动把指定日期（默认昨天）的日记推送到 ntfy，绕过每日限流（仍写推送状态） |
 | `/diary ls` | 列出最近 10 篇（日期 / 字数 / 状态 / 文件路径） |
 | `/diary v [日期] [编号]` | 返回该日日记的元信息 + 文件路径（**不**回显正文） |
@@ -176,7 +180,7 @@ result = await ctx.api.call(
 - **公共 ntfy.sh 的 4KB 限制**：单次请求总大小上限约 4KB（包含 headers + body）。中文 UTF-8 占 3 字节。`max_body_chars = 2000` 是较保守的默认值；超过会自动按句末截断。
 - **自建 ntfy**：无大小限制，且不经第三方服务器。推荐对隐私敏感的用户使用。配置 `server = "https://ntfy.yourdomain.com"` 与 `auth_token = "..."`。
 - **失败重试**：HTTP 错误（含 413）只 warn，不重试；下一次 `push_time` 会自动重试（若 last_pushed_date 仍未写入）。
-- **手动 `/diary gen`**：不会立即推送；将在下一次 `push_time` 统一推送（避免一天内多次打扰）。
+- **手动 `/diary gen`**：若当日 `push_time` 已过，会立即补推一次（跟随补推机制）；未到则等 `push_time` 统一推送，避免一天内多次打扰。
 
 ### 模板占位符
 
@@ -237,7 +241,8 @@ result = await ctx.api.call(
 
 - **.md 文件只本地留存**，本插件不提供任何回传正文的接口。阅读请直接打开文件。
 - **ntfy 推送是 opt-in 例外**：启用 `[ntfy]` 后日记正文会离开本机，请确认接受。
-- LLM 30s 硬上限（host RPC 桥接层）仍然存在；若 LLM 经常超时，把 `llm.timeout_seconds` 调小并把 `llm.truncate_tokens` 调小。
+- LLM 30s 硬上限（host RPC 桥接层）仍然存在；若 LLM 经常超时，**优先调小 `llm.truncate_tokens`**（`llm.timeout_seconds` 超过 30 无效，调小它只是让客户端更早放弃，不解决根因）。
+- 若报「模型返回空内容」或「响应解析失败，choices 为空或缺失」，多为所选模型**默认开启思考模式**（如 glm-5.x）所致，请在该模型的 `extra_params` 配 `{thinking = {type = "disabled"}}`，或改用非推理模型。
 - 多实例部署需要自行加文件锁（当前仅做进程内 `asyncio.Lock` + 持久化日期）。
 - 插件仅做文件存储，不写主程序数据库，卸载后可直接删除 `data/diary/` 目录。
 

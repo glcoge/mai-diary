@@ -7,8 +7,9 @@ admin_qq = []
 generate_time = "04:00"
 push_time = "08:00"
 check_interval_seconds = 60
+# ⚠️ 宿主机/容器为 UTC 时本项不生效（引擎直接信墙钟），请直接改容器时区
 timezone_offset_hours = 8
-persist_state = false
+# persist_state 已废弃（防重复幂等始终生效，不再受它控制），故不再列出
 
 [message]
 filter_mode = "all"
@@ -26,16 +27,22 @@ use_bot_personality = true
 self_description = ""
 
 [llm]
-text_model = "replyer"
+# 填**模型名**（不是任务名），须与 WebUI「模型列表」中已注册的名称一致。
+# ⚠️ 填 "replyer" 这类任务名会报「未找到名为 'replyer' 的模型」。
+# ⚠️ 推理模型（glm-5.x 等默认开思考）跑日记长文本会返回空 choices，
+#    请先在该模型的 extra_params 配 {thinking = {type = "disabled"}}。
+# 留空 = 用主程序默认模型。
+text_model = ""
 temperature = 0.7
+# timeline 送入 LLM 前的 token 上限。host RPC 有 30s 硬上限，调小此值才能缓解超时
 truncate_tokens = 50000
+# ⚠️ 超过 30 无效（RPC 会先切断）
 timeout_seconds = 60
 show_prompt = false
 
 [output]
 base_dir = "data/diary"
 write_markdown = true
-write_json = true
 markdown_header_template = "# {date} 日记\n\n"
 markdown_footer_template = "\n\n---\n\n*由 mai-diary 插件于 {generated_at} 生成*\n"
 
