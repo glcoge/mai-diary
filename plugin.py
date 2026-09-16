@@ -61,6 +61,7 @@ class MaiDiaryPlugin(MaiBotPlugin):
     # ===== 生命周期 =====
 
     async def on_load(self) -> None:
+        self._warn_removed_config_keys()
         if not self.config.plugin.enabled:
             self.ctx.logger.info("mai-diary 已禁用（plugin.enabled=false）")
             return
@@ -83,6 +84,24 @@ class MaiDiaryPlugin(MaiBotPlugin):
             self.config.output.base_dir,
             ntfy_state,
         )
+
+    def _warn_removed_config_keys(self) -> None:
+        """探测已移除的配置键并告警（SDK ``extra="ignore"`` 会静默丢弃，用户无感知）。
+
+        背景（2026-09-16）：``[output].write_json`` 全仓从未被读取，JSON 始终写入，
+        残留该键会让用户以为"关掉能省盘"。
+        """
+        try:
+            raw_config = self.get_plugin_config_data()
+        except Exception as exc:
+            self.ctx.logger.debug("读取原始配置数据失败（跳过移除键检查）: %s", exc)
+            return
+        output_raw = raw_config.get("output")
+        if isinstance(output_raw, dict) and "write_json" in output_raw:
+            self.ctx.logger.warning(
+                "检测到已移除的配置键 [output].write_json（该字段从未被读取，JSON 始终写入；"
+                "/diary ls 与 /diary v 依赖它）。残留值不再生效，可从 config.toml 删除。"
+            )
 
     async def on_unload(self) -> None:
         if self._scheduler is not None:
@@ -291,6 +310,18 @@ class MaiDiaryPlugin(MaiBotPlugin):
             return False, "no admin", True
 
         raw = matched.strip()
+        # 插件关闭时只保留 help。其余命令都依赖 _scheduler（on_load 早退后为 None），
+        # 直接放行会在 _cmd_gen 里抛 AttributeError（2026-09-16 修复）。
+        if not self.config.plugin.enabled:
+            if not raw or raw == "help":
+                await self._cmd_help(stream_id)
+            else:
+                await self.ctx.send.text(
+                    "⚠️ diary 插件已禁用（plugin.enabled=false），仅 /diary help 可用",
+                    stream_id,
+                )
+            return True, "plugin disabled", True
+
         if not raw or raw == "help":
             await self._cmd_help(stream_id)
             return True, "ok", True

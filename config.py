@@ -377,11 +377,8 @@ class OutputSection(PluginConfigBase):
         description="是否写 Markdown 文件。开启后会写入 markdown/ 子目录。",
         json_schema_extra={"label": "写 Markdown", "order": 2},
     )
-    write_json: bool = Field(
-        default=True,
-        description="是否写 JSON 文件（结构化记录，供 /diary v 等命令读取）。",
-        json_schema_extra={"label": "写 JSON", "order": 3},
-    )
+    # 2026-09-16 移除 write_json：全仓从未读取该字段，JSON 始终写入
+    # （/diary ls 与 /diary v 依赖它）。留着只会让人以为关掉能省盘。
     markdown_header_template: str = Field(
         default="# {date} 日记\n\n",
         description="Markdown 文件开头模板。可用占位符: {date}。",
