@@ -185,17 +185,20 @@ class MessageSection(PluginConfigBase):
         default="",
         description=(
             "目标聊天列表（多行字符串，每行一个）。格式: group:群号 或 private:QQ号。"
+            "whitelist（仅列表内）与 blacklist（排除列表内）模式下都需要填写；"
             "filter_mode=all 时被忽略。"
         ),
         json_schema_extra={
             "label": "目标聊天",
-            "hint": "每行一个，例 group:123456 或 private:1523640161",
+            "hint": "每行一个，例 group:123456 或 private:1523640161；"
+                   "whitelist 与 blacklist 模式均需填写",
             "placeholder": "group:123456\nprivate:1523640161",
             # str 默认渲染成单行 <Input>：多行内容会被挤成一行，保存即损坏配置
             "x-widget": "textarea",
             "rows": 4,
-            "depends_on": "message.filter_mode",
-            "depends_value": "whitelist",
+            # 2026-09-16 删除 depends_on / depends_value：前端只在
+            # dashboard/src/lib/plugin-api/types.ts 有类型定义，无组件读取，
+            # 是死元数据（原值 "whitelist" 还会让人误以为 blacklist 下会隐藏本字段）
             "order": 2,
         },
     )
@@ -274,8 +277,7 @@ class SummarySection(PluginConfigBase):
             "hint": "占位符见描述",
             "x-widget": "textarea",
             "rows": 10,
-            "depends_on": "summary.style",
-            "depends_value": "custom",
+            # 2026-09-16 删除 depends_on / depends_value（死元数据，前端无组件读取）
             "order": 4,
         },
     )
@@ -387,8 +389,7 @@ class OutputSection(PluginConfigBase):
             # 默认值含 \n\n：单行 <Input> 会把换行挤掉，保存即损坏
             "x-widget": "textarea",
             "rows": 2,
-            "depends_on": "output.write_markdown",
-            "depends_value": True,
+            # 2026-09-16 删除 depends_on / depends_value（死元数据）
             "order": 4,
         },
     )
@@ -400,8 +401,7 @@ class OutputSection(PluginConfigBase):
             # 同上：默认值以 \n\n 开头，单行输入框会吞掉换行
             "x-widget": "textarea",
             "rows": 2,
-            "depends_on": "output.write_markdown",
-            "depends_value": True,
+            # 2026-09-16 删除 depends_on / depends_value（死元数据）
             "order": 5,
         },
     )

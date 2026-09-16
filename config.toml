@@ -40,9 +40,14 @@ markdown_header_template = "# {date} 日记\n\n"
 markdown_footer_template = "\n\n---\n\n*由 mai-diary 插件于 {generated_at} 生成*\n"
 
 [ntfy]
-enabled = true
+# ⚠️ 启用后日记正文会离开本机（经 ntfy 服务器到手机），请确认接受此边界破坏。
+# 模板默认关闭；需要时自行开启并填 topic。
+enabled = false
 server = "https://ntfy.sh"
-topic = "glcoge-mai-diary"
+# ⚠️ 公共 ntfy.sh 下 topic 名等价于密码，**必须用随机字符串**（如 UUID）。
+# 切勿使用 "mai-diary"、"glcoge-mai-diary" 这类可猜测的名字，
+# 否则任何人订阅该 topic 都能收到你的日记全文。
+topic = ""
 auth_token = ""
 priority = "default"
 tags = [

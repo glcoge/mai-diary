@@ -131,6 +131,24 @@ def test_multiline_templates_use_textarea():
         assert _field_named(name)["ui_type"] == "textarea", name
 
 
+# ===== 死元数据防护 =====
+
+
+def test_no_dead_metadata_in_config_source():
+    """`depends_on` / `depends_value` / `"password": True` 是死元数据。
+
+    前端只在 `dashboard/src/lib/plugin-api/types.ts` 有类型定义，
+    **没有任何组件读取** —— 写了不生效，却会让后来者以为"条件显示"在起作用。
+    2026-09-16 已全部清除，此处防回归（注释行不计）。
+    """
+    source = _CONFIG_PATH.read_text(encoding="utf-8")
+    code = "\n".join(
+        line for line in source.splitlines() if not line.lstrip().startswith("#")
+    )
+    for bad in ('"depends_on"', '"depends_value"', '"password": True'):
+        assert bad not in code, f"config.py 出现死元数据 {bad}（前端不读取，应删除）"
+
+
 # ===== 独立运行入口 =====
 
 if __name__ == "__main__":
