@@ -50,9 +50,8 @@ def build_narrative_status(narrative_ctx: Dict[str, Any]) -> str:
     phase = str(self_state.get("routine_phase") or "")
     if phase:
         parts.append(f"作息：{phase}")
-    hot_thread = str(self_state.get("hot_thread") or "").strip()
-    if hot_thread:
-        parts.append(f"心里挂着：{hot_thread[:40]}")
+    # 2026-09-26：原「心里挂着：hot_thread」行已随 narrative 侧输出字段一并删除。
+    # 该字段自 narrative v0.1.3 起无写入点（恒空），本行从不触发 → 删除为零行为变化。
 
     track = data.get("today_mood_track") or []
     if isinstance(track, list):

@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.4.3 - 2026-09-26
+
+### 细节
+
+- `services/diary/prompts.py`：移除日记 prompt 附加段中的「心里挂着：…」行（原读取 narrative 自我层的
+  `hot_thread` 字段）。该字段自 narrative v0.1.3 起已无写入点（恒为空串），此行从不触发，删除属
+  **零行为变化**；narrative 侧同日同步移除了该输出字段，两侧 lockstep 收敛。
+
 ## 1.4.0 - 2026-09-11
 
 ### 用户感知功能

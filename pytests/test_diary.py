@@ -856,7 +856,6 @@ def _make_narrative_ctx_payload(
             "mood_energy": 0.55,
             "mood_shift_ts": "",
             "routine_phase": "上午",
-            "hot_thread": "",
             "recent_chronicle": [],
         },
         "today_mood_track": [],
