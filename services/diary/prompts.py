@@ -29,8 +29,41 @@ def _render_narrative_status(narrative_status: str) -> str:
     return f"\n{text}\n"
 
 
+def _life_material_lines(self_state: Dict[str, Any]) -> List[str]:
+    """当日生活素材行（高光在前，普通片段在后）。
+
+    narrative 侧自 2026-10-01 起在 ``self_state`` 回 ``today_highlights`` /
+    ``today_life_fragments``（各自已按时间升序）。旧版 narrative 没有这两个键
+    → 取到空列表即**静默跳过**（跨插件降级纪律：握手是附加动作，缺素材不能
+    影响日记生成）。
+
+    为什么单独成段而不是塞进"状态"（2026-10-01 用户反馈）：此前这两个字段
+    存在于返回值里却**无人消费**，日记通篇只剩私聊/群聊话题；作者"自己的
+    一天"完全缺席。故单独给一段，并明确写出「以这些为主线」。
+    """
+    lines: List[str] = []
+    highlights = [
+        str(item).strip() for item in (self_state.get("today_highlights") or [])
+        if str(item).strip()
+    ]
+    if highlights:
+        lines.append("印象深刻：" + "；".join(highlights))
+    fragments = [
+        str(item).strip() for item in (self_state.get("today_life_fragments") or [])
+        if str(item).strip()
+    ]
+    if fragments:
+        lines.append("其他片段：" + "；".join(fragments))
+    return lines
+
+
 def build_narrative_status(narrative_ctx: Dict[str, Any]) -> str:
     """把剧本自我层的当日状态渲染成 prompt 附加上下文（供日记口吻对齐）。
+
+    两段结构（有则输出，无则整段省略）：
+
+    1. ``〔作者当日状态…〕``：心情 / 作息 / 情绪轨迹；
+    2. ``〔她今天自己的生活…〕``：当日高光 + 普通生活片段（本次接线的新段）。
 
     TODO(Round 3)：``today_mood_track``（每日情绪轨迹）表未建，v0.1 只注入
     当前心情快照；轨迹字段已在 narrative API 预留，当前返回空列表，此处透传
@@ -59,9 +92,17 @@ def build_narrative_status(narrative_ctx: Dict[str, Any]) -> str:
         if track_text:
             parts.append(f"今日情绪轨迹：{track_text}")
 
-    if not parts:
-        return ""
-    return "〔作者当日状态（来自剧本人设自我层）：" + "，".join(parts) + "〕"
+    life_lines = _life_material_lines(self_state)
+
+    blocks: List[str] = []
+    if parts:
+        blocks.append("〔作者当日状态（来自剧本人设自我层）：" + "，".join(parts) + "〕")
+    if life_lines:
+        blocks.append(
+            "〔她今天自己的生活（来自剧本人设自我层，与聊天无关；"
+            "写本篇时以这些为主线，聊天内容只作点缀）：" + "；".join(life_lines) + "〕"
+        )
+    return "\n".join(blocks)
 
 
 def build_diary_prompt(

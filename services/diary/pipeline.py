@@ -121,6 +121,7 @@ class DiaryPipeline:
     async def _resolve_personality(
         self,
         messages: Optional[List[Dict[str, Any]]] = None,
+        date: str = "",
     ) -> Tuple[str, str, str, Optional[Dict[str, Any]]]:
         """解析日记作者人格（含剧本人设「会话分诊」）。
 
@@ -128,6 +129,11 @@ class DiaryPipeline:
         - 若时间窗内存在剧本模式会话 → 作者人格改用剧本「自我层」
           （锚定 identity + 心情 + 作息），避免日记读出来是默认人格的割裂；
         - 否则沿用主程序全局 ``personality.*`` 旧逻辑。
+
+        Args:
+            messages: 本条日记时间窗内的消息。
+            date: 被写日记的日期（``YYYY-MM-DD``），透传给 narrative ——
+                04:00 这一跑写的是**昨天**，生活片段必须按那天取。
 
         Returns:
             ``(personality, expression, bot_qq, narrative_ctx)``。
@@ -140,7 +146,7 @@ class DiaryPipeline:
 
         # 剧本人设分诊：剧本模式会话 → 自我层人格
         if self._cfg.narrative.enabled:
-            narrative_ctx = await self._bridge.fetch_diary_context(messages)
+            narrative_ctx = await self._bridge.fetch_diary_context(messages, date=date)
             if narrative_ctx is not None:
                 data = narrative_ctx.get("data") or {}
                 self_state = data.get("self_state") or {}
@@ -166,7 +172,9 @@ class DiaryPipeline:
     ) -> Tuple[bool, str, bool]:
         """从已抓取的消息生成日记。返回 ``(ok, message, retryable)``。"""
         try:
-            personality, expression, bot_qq, narrative_ctx = await self._resolve_personality(messages)
+            personality, expression, bot_qq, narrative_ctx = await self._resolve_personality(
+                messages, date=date
+            )
 
             timeline_builder = TimelineBuilder(
                 bot_qq_account=bot_qq,

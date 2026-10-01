@@ -798,6 +798,7 @@ class _FakeApi:
         self._context_payload = context_payload
         self._append_payload = append_payload
         self.append_calls: list = []
+        self.context_calls: list = []
 
     async def list(self, plugin_id: str = "") -> list:
         if plugin_id == "glcoge.mai-narrative":
@@ -806,6 +807,7 @@ class _FakeApi:
 
     async def call(self, api_name: str, **kwargs) -> Any:
         if api_name == "glcoge.mai-narrative.narrative_diary_context":
+            self.context_calls.append(kwargs)
             return dict(self._context_payload or {})
         if api_name == "glcoge.mai-narrative.narrative_chronicle_append":
             self.append_calls.append(kwargs)
@@ -943,6 +945,7 @@ async def _resolve_persona_with(
     global_config: Optional[Dict[str, Any]] = None,
     context_payload: Optional[Dict[str, Any]] = None,
     narrative_enabled: bool = True,
+    date: str = "",
     tmp_path: Path,
 ) -> Dict[str, Any]:
     """构造 pipeline 并执行 _resolve_personality（不触达 LLM / 消息抓取）。"""
@@ -952,12 +955,15 @@ async def _resolve_persona_with(
     cfg.output.base_dir = str(tmp_path / "diary")
     plugin = SimpleNamespace(ctx=ctx, config=cfg)
     pipeline = DiaryPipeline(plugin)
-    personality, expression, bot_qq, narrative_ctx = await pipeline._resolve_personality(messages)
+    personality, expression, bot_qq, narrative_ctx = await pipeline._resolve_personality(
+        messages, date=date
+    )
     return {
         "personality": personality,
         "expression": expression,
         "bot_qq": bot_qq,
         "narrative_ctx": narrative_ctx,
+        "api": api,
     }
 
 
@@ -1079,6 +1085,71 @@ def test_narrative_status_builds_from_self_state():
     assert "精力 6/10" in status
     assert "作息：上午" in status
     assert "今日情绪轨迹" in status
+
+
+# ===== 当日生活素材进日记（2026-10-01 接线） =====
+#
+# 背景：用户反馈「日记里全是 bot 昨天在私聊/群聊的话题，自己的生活片段没进去」。
+# 取证结论**不是**隔离问题：生活片段取材源只读 events 表，且 diary 产物有
+# ADR-0004 双向短路；真因是 narrative 早已回传的素材字段 diary 侧一个都没消费。
+# 修复 = narrative 按**被写日期**精取当日 life_highlight / life，diary 侧
+# build_narrative_status 拼成独立一段写进 prompt。跨插件 lockstep：缺一段则
+# 另一侧降级为空，**不报错、不阻塞**（由下面的反例钉住）。
+
+
+def test_bridge_forwards_diary_date_to_narrative(tmp_path: Path):
+    """被写日记的日期必须透传到 narrative（04:00 写的是**昨天**）。"""
+    messages = [_make_private_msg(0, "10001", "Alice", "你好", "s1")]
+    out = asyncio.run(_resolve_persona_with(
+        messages=messages,
+        context_payload=_make_narrative_ctx_payload(),
+        date="2026-09-30",
+        tmp_path=tmp_path,
+    ))
+    # 走到握手 branch 才会产生 context call（未命中/未启用时为空）
+    assert out["api"].context_calls == [{"date": "2026-09-30"}]
+
+
+def test_narrative_status_includes_life_material_block():
+    """当日高光 + 普通片段拼成独立一段，且排在状态段之后。"""
+    payload = _make_narrative_ctx_payload()
+    payload["self_state"]["today_highlights"] = ["傍晚在码头边看见一只三条腿的猫"]
+    payload["self_state"]["today_life_fragments"] = ["上午把书架重新排了一遍"]
+    status = build_narrative_status({"data": payload})
+
+    blocks = [line for line in status.splitlines() if line.strip()]
+    assert len(blocks) == 2, f"应为「状态段 + 生活段」两段，实际 {blocks}"
+    assert blocks[0].startswith("〔作者当日状态")
+    life_block = blocks[1]
+    assert life_block.startswith("〔她今天自己的生活")
+    assert "印象深刻：傍晚在码头边看见一只三条腿的猫" in life_block
+    assert "其他片段：上午把书架重新排了一遍" in life_block
+    # 明确要求模型"以这些为主线"，否则会被聊天 timeline 盖过去
+    assert "以这些为主线" in life_block
+
+
+def test_narrative_status_omits_life_block_without_material():
+    """旧版 narrative（无这两个键）→ 生活段整段省略，行为等同接线前。"""
+    payload = _make_narrative_ctx_payload()
+    status = build_narrative_status({"data": payload})
+    assert "她今天自己的生活" not in status
+    assert status.startswith("〔作者当日状态")
+    assert status.endswith("〕")
+
+
+def test_narrative_status_only_life_material_when_no_state():
+    """只有生活素材、无心情作息 → 只出生活段（两段各自独立，互不牵连）。"""
+    status = build_narrative_status({"data": {"self_state": {
+        "today_highlights": ["写了三页手账"],
+        "today_life_fragments": [],
+    }}})
+    assert status.startswith("〔她今天自己的生活")
+    assert "作者当日状态" not in status
+
+
+def test_narrative_status_empty_when_nothing():
+    """全空 → 空串（prompt 侧不注入空段）。"""
+    assert build_narrative_status({"data": {"self_state": {}}}) == ""
 
 
 # ===== 调度器：推送双通道 / 失败退避重试 =====

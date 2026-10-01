@@ -82,8 +82,16 @@ class NarrativeBridge:
     async def fetch_diary_context(
         self,
         messages: Optional[List[Dict[str, Any]]] = None,
+        date: str = "",
     ) -> Optional[Dict[str, Any]]:
         """获取剧本模式判定 + 自我层人格摘要。
+
+        Args:
+            messages: 本条日记时间窗内的消息（用于判定是否存在剧本模式会话）。
+            date: **被写日记的日期**（``YYYY-MM-DD``）。本插件 04:00 跑的是
+                **昨天**那篇，必须显式传给 narrative —— 否则它会按"今天"取
+                当日生活片段，凌晨这一跑必然取空。旧版 narrative 不认这个
+                入参（``**kwargs`` 丢弃），行为等同不传，安全降级。
 
         Returns:
             ``None``：narrative 未启用 / 不可用 / 调用失败（走旧逻辑）。
@@ -94,7 +102,7 @@ class NarrativeBridge:
         if not await self._probe_available():
             return None
 
-        data = await self._call_api(_CONTEXT_API)
+        data = await self._call_api(_CONTEXT_API, date=str(date or "").strip())
         if data is None or not bool(data.get("ok")):
             return None
         if not bool(data.get("narrative_enabled")):
